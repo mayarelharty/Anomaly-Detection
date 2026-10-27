@@ -1,4 +1,14 @@
 {
-  "clf__max_depth": "None",
-  "clf__n_estimators": 300
+  "smoteenn": {
+    "clf__max_depth": "None",
+    "clf__n_estimators": 100
+  },
+  "balanced": {
+    "clf__max_depth": 10,
+    "clf__n_estimators": 100
+  },
+  "reference": {
+    "clf__max_depth": "None",
+    "clf__n_estimators": 100
+  }
 }

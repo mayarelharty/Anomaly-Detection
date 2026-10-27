@@ -1,112 +1,83 @@
 """
-scoring.py – Anomaly score columns (in-sample, out-of-fold, enriched output).
+scoring.py – Feature Enrichment & Leak-Free Anomaly Scoring.
 
-Public API
-----------
-score_anomalies(gs, X, y, df, train_idx, test_idx, X_train, y_train)
-    -> pd.DataFrame  (enriched dataset)
+Enriches original dataset with:
+- Ground truth binary labels: y_anom, anom_A, anom_P, anom_Q
+- Chronological split column: 'train', 'test', or 'dropped_no_history'
+- Calibrated Anomaly Scores (OOF for training, final model for test)
+- Raw probability scores for all three variants (smoteenn, balanced, reference)
+- Explicitly removes optimistic in-sample scores.
 """
 
 import os
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit
 
 import config as cfg
-from modeling import build_pipeline
 
 
-def score_anomalies(gs, X, y, df, train_idx, test_idx, X_train, y_train) -> pd.DataFrame:
+def build_enriched_dataset(df_orig: pd.DataFrame, df_labels_full: pd.DataFrame,
+                           valid_train_idx: list, valid_test_idx: list,
+                           all_variants_data: dict, output_dir: str):
     """
-    Produce Anomaly_Score and Anomaly_Score_OOF columns.
-
-    - Anomaly_Score:     predict_proba from the final model on ORIGINAL
-                         (unbalanced) train and test sets separately.
-    - Anomaly_Score_OOF: out-of-fold probabilities for train rows (using
-                         the same CV scheme, refit pipeline per fold with
-                         best params);  final model scores for test rows.
-
-    Never scores SMOTEENN-resampled data.
+    Assemble the final leak-free enriched dataset.
     """
-    best = gs.best_estimator_
-    best_params = gs.best_params_
+    enriched = df_orig.copy()
 
-    # ── Anomaly_Score: final model on original data ────────
-    score_train = best.predict_proba(X.loc[train_idx])[:, 1]
-    score_test  = best.predict_proba(X.loc[test_idx])[:, 1]
+    # Ground truth labels
+    enriched["y_anom"] = df_labels_full["y_anom"].values
+    enriched["anom_A"] = df_labels_full["anom_A"].values
+    enriched["anom_P"] = df_labels_full["anom_P"].values
+    enriched["anom_Q"] = df_labels_full["anom_Q"].values
 
-    anomaly_score = pd.Series(np.nan, index=df.index, dtype=float)
-    anomaly_score.iloc[train_idx] = score_train
-    anomaly_score.iloc[test_idx]  = score_test
+    # Split assignment
+    enriched["split"] = "dropped_no_history"
+    enriched.loc[valid_train_idx, "split"] = "train"
+    enriched.loc[valid_test_idx,  "split"] = "test"
 
-    # ── Anomaly_Score_OOF ──────────────────────────────────
-    oof_scores = pd.Series(np.nan, index=df.index, dtype=float)
+    # Populate scores for each variant
+    for vname, data in all_variants_data.items():
+        score_col_cal = f"Anomaly_Score_{vname}" if vname != cfg.PRIMARY_VARIANT else "Anomaly_Score"
+        score_col_raw = f"Anomaly_Score_{vname}_raw" if vname != cfg.PRIMARY_VARIANT else "Anomaly_Score_raw"
 
-    # out-of-fold for train
-    if cfg.SPLIT_MODE == "chronological":
-        cv = TimeSeriesSplit(n_splits=cfg.CV_FOLDS)
-        # Check fold validity - fall back to stratified if needed
-        all_ok = True
-        for tr_i, va_i in cv.split(X_train):
-            if len(set(y_train.iloc[tr_i])) < 2 or len(set(y_train.iloc[va_i])) < 2:
-                all_ok = False
-                break
-        if not all_ok:
-            cv = StratifiedKFold(n_splits=cfg.CV_FOLDS, shuffle=True,
-                                 random_state=cfg.SEED)
-    else:
-        cv = StratifiedKFold(n_splits=cfg.CV_FOLDS, shuffle=True,
-                             random_state=cfg.SEED)
+        # Initialize with NaN
+        enriched[score_col_cal] = np.nan
+        enriched[score_col_raw] = np.nan
 
-    oof_train = np.full(len(train_idx), np.nan)
-    for fold_i, (tr_i, va_i) in enumerate(cv.split(X_train, y_train)):
-        pipe = build_pipeline()
-        pipe.set_params(**best_params)
-        pipe.fit(X_train.iloc[tr_i], y_train.iloc[tr_i])
-        oof_train[va_i] = pipe.predict_proba(X_train.iloc[va_i])[:, 1]
-        print(f"  [scoring] OOF fold {fold_i+1}/{cfg.CV_FOLDS} done")
+        # Train rows: Walk-forward OOF (warm-up block stays NaN)
+        enriched.loc[valid_train_idx, score_col_cal] = data["oof_calibrated"]
+        enriched.loc[valid_train_idx, score_col_raw] = data["oof_raw"]
 
-    oof_scores.iloc[train_idx] = oof_train
-    # test rows: use final model
-    oof_scores.iloc[test_idx] = score_test
+        # Test rows: Final model scores on untouched test set
+        enriched.loc[valid_test_idx, score_col_cal] = data["test_cal_scores"]
+        enriched.loc[valid_test_idx, score_col_raw] = data["test_raw_scores"]
 
-    # ── assemble enriched dataset ──────────────────────────
-    enriched = df.copy()
-    enriched["split"]             = "train"
-    enriched.loc[test_idx, "split"] = "test"
-    enriched["Anomaly_Score"]     = anomaly_score.values
-    enriched["Anomaly_Score_OOF"] = oof_scores.values
+    # Also keep standard named columns if primary variant is smoteenn
+    if cfg.PRIMARY_VARIANT == "smoteenn":
+        enriched["Anomaly_Score_smoteenn"] = enriched["Anomaly_Score"]
+        enriched["Anomaly_Score_smoteenn_raw"] = enriched["Anomaly_Score_raw"]
 
-    # assertion: row order matches original
-    assert list(enriched.index) == list(df.index), "Row order mismatch!"
+    # Assertion: row order strictly equals original row order
+    assert list(enriched.index) == list(df_orig.index), "Assertion Error: Enriched row order deviated from original!"
 
-    # ── report in-sample vs out-of-fold gap ────────────────
-    from sklearn.metrics import roc_auc_score
-
-    print("\n" + "=" * 60)
-    print("ANOMALY SCORE SUMMARY")
-    print("=" * 60)
-    for name, idx, col in [
-        ("Train (in-sample)", train_idx, "Anomaly_Score"),
-        ("Train (OOF)",       train_idx, "Anomaly_Score_OOF"),
-        ("Test",              test_idx,  "Anomaly_Score"),
-    ]:
-        s = enriched.loc[idx, col].dropna()
-        yt = y.loc[s.index]
-        if len(s) == 0 or yt.nunique() < 2:
-            auc_val = float("nan")
-        else:
-            auc_val = roc_auc_score(yt, s)
-        print(f"  {name:25s}  mean_score={s.mean():.4f}  ROC-AUC={auc_val:.4f}  (n={len(s)})")
-
-    # ── save ───────────────────────────────────────────────
-    out_path = os.path.join(cfg.OUTPUT_DIR, "enriched_dataset.csv")
+    # Save CSV
+    out_path = os.path.join(output_dir, "enriched_dataset.csv")
     try:
         enriched.to_csv(out_path, index=False)
-        print(f"[scoring] Saved enriched_dataset.csv ({enriched.shape})")
+        print(f"[scoring] Saved enriched_dataset.csv ({enriched.shape}) to {out_path} ✓")
     except PermissionError:
-        alt_path = os.path.join(cfg.OUTPUT_DIR, "enriched_dataset_run.csv")
+        alt_path = os.path.join(output_dir, "enriched_dataset_run.csv")
         enriched.to_csv(alt_path, index=False)
-        print(f"[scoring] [WARNING] `enriched_dataset.csv` locked. Saved to {alt_path} ({enriched.shape})")
+        print(f"[scoring] [WARNING] File locked. Saved to {alt_path} ({enriched.shape})")
+
+    # Diagnostic summary
+    primary_data = all_variants_data[cfg.PRIMARY_VARIANT]
+    print("\n" + "=" * 60)
+    print("ANOMALY SCORE AUDIT (Leak-Free Out-Of-Fold & Test)")
+    print("=" * 60)
+    print(f"  Warm-up block NaNs (Fold 0 training): {primary_data['warm_up_nans']} rows")
+    print(f"  Dropped first-run rows (No history):  {len(df_orig) - len(valid_train_idx) - len(valid_test_idx)} rows")
+    print(f"  Valid evaluated Train OOF rows:       {len(valid_train_idx) - primary_data['warm_up_nans']} rows")
+    print(f"  Valid evaluated Test rows:            {len(valid_test_idx)} rows")
 
     return enriched

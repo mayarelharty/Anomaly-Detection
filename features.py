@@ -1,134 +1,218 @@
 """
-features.py – Feature construction and selection transformers.
+features.py – Feature Engineering & Selection for Anomaly Risk Prediction.
 
-Public API
-----------
-build_features(df, train_idx) -> (X: pd.DataFrame, feature_names: list)
-FeatureSelector        – sklearn-compatible transformer for pipeline use
+Phase 2 uses FEATURE_MODE = "history_only":
+The ML predicts next-shift anomaly risk strictly from historical indicators.
+No same-row parameters (Operating time, Downtime, Production, Defects, A, P, Q, OEE)
+are allowed in X.
 """
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import StandardScaler
 
 import config as cfg
 
+# Explicit list of forbidden columns (current-shift definitions/outcomes)
+FORBIDDEN_COLUMNS = [
+    "Operating time (min)",
+    "Total Downtime (min)",
+    "Planned Downtime (min)",
+    "Unplanned Downtime (min)",
+    "Production (pcs)",
+    "Defects (pcs)",
+    "Cycle time – Min CT (min/pc)",
+    "Availability (A)",
+    "Performance (P)",
+    "Quality (Q)",
+    "OEE",
+    "Sec ID",
+]
 
-# ────────────────────── feature matrix construction ────────
-def build_features(df: pd.DataFrame, train_idx=None):
+
+class ScaledFeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Build the feature matrix X (numeric-only) according to FEATURE_MODE.
+    Feature selector that:
+    1. Computes variance on standardized/scaled features to avoid penalizing
+       naturally bounded variables (e.g. Quality).
+    2. Drops features with scaled variance < nzv_threshold (default 0.01).
+    3. Identifies feature pairs with |r| > corr_threshold (default 0.90)
+       and drops the feature with lower correlation to y.
 
-    Returns (X: pd.DataFrame, feature_names: list[str]).
-    """
-    if cfg.FEATURE_MODE == "same_row":
-        cols = [
-            "Operating time (min)",
-            "Total Downtime (min)",
-            "Production (pcs)",
-            "Defects (pcs)",
-            "Cycle time – Min CT (min/pc)",
-        ]
-        X = df[cols].copy()
-
-    elif cfg.FEATURE_MODE == "history_only":
-        X = _history_features(df)
-
-    else:
-        raise ValueError(f"Unknown FEATURE_MODE: {cfg.FEATURE_MODE}")
-
-    print(f"[features] Mode = {cfg.FEATURE_MODE}, shape = {X.shape}")
-    return X, list(X.columns)
-
-
-def _history_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Per machine+model, lagged A/P/Q/label of the previous run, rolling
-    mean of the previous 5 runs (shifted so the current row is never
-    included), day of week, month, machine and model as codes.
-    """
-    df = df.copy()
-    df["day_of_week"] = df["Date"].dt.dayofweek
-    df["month"]       = df["Date"].dt.month
-
-    # encode machine & model as integer codes
-    df["machine_code"] = df["machine"].astype("category").cat.codes
-    df["model_code"]   = df["Model"].astype("category").cat.codes
-
-    group_cols = ["machine", "Model"]
-    for col in ["Availability (A)", "Performance (P)", "Quality (Q)"]:
-        lag_name = f"lag1_{col}"
-        roll_name = f"roll5_{col}"
-        df[lag_name]  = df.groupby(group_cols)[col].shift(1)
-        df[roll_name] = (
-            df.groupby(group_cols)[col]
-              .transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
-        )
-
-    keep = [c for c in df.columns if c.startswith(("lag1_", "roll5_"))] + [
-        "day_of_week", "month", "machine_code", "model_code",
-    ]
-    return df[keep].fillna(0)
-
-
-# ────────────────────── feature selector transformer ───────
-class FeatureSelector(BaseEstimator, TransformerMixin):
-    """
-    Drops near-zero variance columns (threshold < nzv_threshold) and
-    one of each pair with |r| > corr_threshold (keeps the one more
-    correlated with y).
-
-    Fitted on training data only; applied identically to test data.
+    Fitted on training data only.
     """
     def __init__(self, nzv_threshold: float = 0.01, corr_threshold: float = 0.90):
         self.nzv_threshold = nzv_threshold
         self.corr_threshold = corr_threshold
+        self.keep_columns_ = None
+        self.drop_columns_ = []
+        self.feature_names_in_ = None
 
     def fit(self, X, y=None):
-        X = pd.DataFrame(X)
-        # 1. near-zero variance
-        variances = X.var()
-        self.nzv_drop_ = list(variances[variances < self.nzv_threshold].index)
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = list(X.columns)
+            X_df = X.copy()
+        else:
+            self.feature_names_in_ = [f"feat_{i}" for i in range(X.shape[1])]
+            X_df = pd.DataFrame(X, columns=self.feature_names_in_)
 
-        X_kept = X.drop(columns=self.nzv_drop_, errors="ignore")
+        # 1. Variance on scaled features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_df)
+        scaled_vars = np.var(X_scaled, axis=0)
 
-        # 2. high correlation
-        self.corr_drop_ = []
-        if y is not None and len(X_kept.columns) > 1:
-            corr_matrix = X_kept.corr().abs()
-            target_corr = X_kept.corrwith(pd.Series(y, index=X_kept.index)).abs()
-            upper = corr_matrix.where(
-                np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1)
-            )
+        nzv_drop = [col for col, v in zip(self.feature_names_in_, scaled_vars) if v < self.nzv_threshold]
+
+        retained = [c for c in self.feature_names_in_ if c not in nzv_drop]
+        corr_drop = []
+
+        # 2. Correlation filter
+        if len(retained) > 1 and y is not None:
+            y_s = pd.Series(y, index=X_df.index) if not isinstance(y, pd.Series) else y
+            corr_mat = X_df[retained].corr().abs()
+            target_corr = X_df[retained].corrwith(y_s).abs()
+
+            upper = corr_mat.where(np.triu(np.ones(corr_mat.shape), k=1).astype(bool))
             for col in upper.columns:
-                high_corr_pairs = upper.index[upper[col] > self.corr_threshold].tolist()
-                for pair_col in high_corr_pairs:
-                    # drop the one less correlated with target
-                    if pair_col not in self.corr_drop_:
-                        drop_col = (
-                            pair_col if target_corr.get(col, 0) >= target_corr.get(pair_col, 0)
-                            else col
-                        )
-                        if drop_col not in self.corr_drop_:
-                            self.corr_drop_.append(drop_col)
+                high_pairs = upper.index[upper[col] > self.corr_threshold].tolist()
+                for pair in high_pairs:
+                    if pair not in corr_drop and col not in corr_drop:
+                        drop_c = pair if target_corr.get(col, 0) >= target_corr.get(pair, 0) else col
+                        corr_drop.append(drop_c)
 
-        self.drop_cols_ = list(set(self.nzv_drop_ + self.corr_drop_))
-        self.keep_cols_ = [c for c in X.columns if c not in self.drop_cols_]
+        self.drop_columns_ = list(set(nzv_drop + corr_drop))
+        self.keep_columns_ = [c for c in self.feature_names_in_ if c not in self.drop_columns_]
         return self
 
     def transform(self, X):
-        X = pd.DataFrame(X)
-        # use positional indexing for safety (SMOTE returns numpy arrays)
-        if isinstance(X.columns[0], str):
-            return X[[c for c in X.columns if c not in self.drop_cols_]].values
+        if hasattr(X, "columns"):
+            return X[self.keep_columns_].values
         else:
-            # numpy array input – use column positions
-            drop_idx = [i for i, c in enumerate(range(X.shape[1]))
-                        if c in [int(d) for d in self.drop_cols_ if isinstance(d, (int, np.integer))]]
-            keep_idx = [i for i in range(X.shape[1]) if i not in drop_idx]
-            if not keep_idx:
-                keep_idx = list(range(X.shape[1]))
-            return X.iloc[:, keep_idx].values if hasattr(X, "iloc") else X[:, keep_idx]
+            X_df = pd.DataFrame(X, columns=self.feature_names_in_)
+            return X_df[self.keep_columns_].values
 
     def get_feature_names_out(self, input_features=None):
-        return self.keep_cols_
+        return np.array(self.keep_columns_)
+
+
+def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Series):
+    """
+    Construct strictly historical features per machine + model:
+    - machine_code, model_code, day_of_week, month
+    - lag-1 of A, P, Q, y_anom
+    - rolling-5 (shifted, mean of previous up to 5 runs) of A, P, Q, y_anom
+
+    Drops rows with no previous run (first run of each machine+model).
+    Performs hand verification on lag integrity and asserts no forbidden features.
+    """
+    df_feat = df.copy()
+    df_feat["y_anom"] = y_anom.values
+
+    # Calendar & code features
+    df_feat["day_of_week"] = df_feat["Date"].dt.dayofweek
+    df_feat["month"]       = df_feat["Date"].dt.month
+    df_feat["machine_code"] = df_feat["machine"].astype("category").cat.codes
+    df_feat["model_code"]   = df_feat["Model"].astype("category").cat.codes
+
+    group_cols = ["machine", "Model"]
+    metrics_to_lag = [
+        ("Availability (A)", "Availability"),
+        ("Performance (P)",  "Performance"),
+        ("Quality (Q)",      "Quality"),
+        ("y_anom",           "y_anom"),
+    ]
+
+    for raw_c, short_c in metrics_to_lag:
+        # Shift 1: guarantees strictly earlier rows
+        df_feat[f"lag1_{short_c}"] = df_feat.groupby(group_cols)[raw_c].shift(1)
+        # Shift 1 then rolling 5
+        df_feat[f"roll5_{short_c}"] = (
+            df_feat.groupby(group_cols)[raw_c]
+                   .transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
+        )
+
+    feature_cols = [
+        "machine_code", "model_code", "day_of_week", "month",
+        "lag1_Availability", "roll5_Availability",
+        "lag1_Performance",  "roll5_Performance",
+        "lag1_Quality",      "roll5_Quality",
+        "lag1_y_anom",       "roll5_y_anom",
+    ]
+
+    # Check for forbidden columns
+    for fc in FORBIDDEN_COLUMNS:
+        assert fc not in feature_cols, f"CRITICAL: Forbidden column {fc} found in feature matrix!"
+
+    # Identify rows with no previous run
+    no_prev_mask = df_feat["lag1_Availability"].isna()
+    n_drop_train = int((no_prev_mask & df_feat.index.isin(train_idx)).sum())
+    n_drop_test  = int((no_prev_mask & df_feat.index.isin(test_idx)).sum())
+    print(f"[features] Dropping runs with no previous history: Train = {n_drop_train}, Test = {n_drop_test}")
+
+    # Valid rows
+    valid_train_idx = [i for i in train_idx if not no_prev_mask.loc[i]]
+    valid_test_idx  = [i for i in test_idx if not no_prev_mask.loc[i]]
+
+    # Hand verification on sampled rows to verify lag strictness
+    _verify_lag_strictness(df_feat, group_cols)
+
+    X_train = df_feat.loc[valid_train_idx, feature_cols].reset_index(drop=True)
+    y_train = df_feat.loc[valid_train_idx, "y_anom"].reset_index(drop=True)
+
+    X_test  = df_feat.loc[valid_test_idx, feature_cols].reset_index(drop=True)
+    y_test  = df_feat.loc[valid_test_idx, "y_anom"].reset_index(drop=True)
+
+    return {
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_test": X_test,
+        "y_test": y_test,
+        "valid_train_idx": valid_train_idx,
+        "valid_test_idx": valid_test_idx,
+        "feature_cols": feature_cols,
+        "cat_indices": [0, 1, 2, 3],  # machine_code, model_code, day_of_week, month
+        "n_drop_train": n_drop_train,
+        "n_drop_test": n_drop_test,
+        "full_feat_df": df_feat,
+    }
+
+
+def _verify_lag_strictness(df_feat: pd.DataFrame, group_cols):
+    """
+    Hand-verify sampled rows to ensure lag features match the immediately
+    prior run in that (machine, model) group and strictly never the current row.
+    """
+    for (m, mod), grp in df_feat.groupby(group_cols):
+        if len(grp) >= 3:
+            # Check row 2 (0-indexed 1) vs row 1 (0-indexed 0)
+            idx0 = grp.index[0]
+            idx1 = grp.index[1]
+            actual_a0 = grp.loc[idx0, "Availability (A)"]
+            lagged_a1 = grp.loc[idx1, "lag1_Availability"]
+            actual_a1 = grp.loc[idx1, "Availability (A)"]
+
+            assert np.isclose(actual_a0, lagged_a1, equal_nan=True), \
+                f"Leakage check failed: group {(m, mod)} lag1 {lagged_a1} != prev {actual_a0}"
+            assert not np.isclose(lagged_a1, actual_a1) or np.isclose(actual_a0, actual_a1), \
+                f"Suspicious equality between lag and current value in group {(m, mod)}"
+    print("[features] Strict lag integrity check passed ✓ (lag-1 strictly matches prior run)")
+
+
+def build_same_row_diagnostic(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Series):
+    """
+    Diagnostic-only same_row feature builder to document rule-recovery ceiling.
+    MUST NEVER be used to produce Anomaly_Score.
+    """
+    cols = [
+        "Operating time (min)",
+        "Total Downtime (min)",
+        "Production (pcs)",
+        "Defects (pcs)",
+        "Cycle time – Min CT (min/pc)",
+    ]
+    X_train = df.loc[train_idx, cols].reset_index(drop=True)
+    y_train = y_anom.loc[train_idx].reset_index(drop=True)
+    X_test  = df.loc[test_idx, cols].reset_index(drop=True)
+    y_test  = y_anom.loc[test_idx].reset_index(drop=True)
+    return X_train, y_train, X_test, y_test
