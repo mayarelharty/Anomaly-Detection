@@ -1,0 +1,4 @@
+{
+  "clf__max_depth": "None",
+  "clf__n_estimators": 300
+}
