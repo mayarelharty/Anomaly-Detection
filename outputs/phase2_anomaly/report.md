@@ -88,14 +88,14 @@
 
 ### Threshold Sensitivity Analysis (K $\times$ Scope)
 > Note: This sensitivity table is provided for audit purposes only; the pipeline strictly uses the pre-declared headline configuration (`IQR_K = 1.5`, `scope = 'machine_model'`).
-| Scope         |   IQR_K |   Train Anomalies | Train Rate   |   Test Anomalies | Test Rate   | Gate   | Dim Warning        |
-|:--------------|--------:|------------------:|:-------------|-----------------:|:------------|:-------|:-------------------|
-| global        |     1.5 |                98 | 7.33%        |               21 | 3.60%       | PASS   | Yes (<10 in A/P/Q) |
-| global        |     2   |                72 | 5.39%        |               12 | 2.05%       | PASS   | Yes (<10 in A/P/Q) |
-| global        |     3   |                43 | 3.22%        |                7 | 1.20%       | FAIL   | Yes (<10 in A/P/Q) |
-| machine_model |     1.5 |               179 | 13.39%       |               44 | 7.53%       | PASS   | Yes (<10 in A/P/Q) |
-| machine_model |     2   |               133 | 9.95%        |               30 | 5.14%       | PASS   | Yes (<10 in A/P/Q) |
-| machine_model |     3   |                86 | 6.43%        |               15 | 2.57%       | PASS   | Yes (<10 in A/P/Q) |
+| Scope | IQR_K | Train Anomalies | Train Rate | Test Anomalies | Test Rate | Gate | Dim Warning |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| global | 1.5 | 98 | 7.33% | 21 | 3.60% | PASS | Yes (<10 in A/P/Q) |
+| global | 2.0 | 72 | 5.39% | 12 | 2.05% | PASS | Yes (<10 in A/P/Q) |
+| global | 3.0 | 43 | 3.22% | 7 | 1.20% | FAIL | Yes (<10 in A/P/Q) |
+| machine_model | 1.5 | 179 | 13.39% | 44 | 7.53% | PASS | Yes (<10 in A/P/Q) |
+| machine_model | 2.0 | 133 | 9.95% | 30 | 5.14% | PASS | Yes (<10 in A/P/Q) |
+| machine_model | 3.0 | 86 | 6.43% | 15 | 2.57% | PASS | Yes (<10 in A/P/Q) |
 
 ## 4. Label Gate Verification
 - **Gate Status:** PASSED ✓ (Training anomalies $\ge 50$, Test anomalies $\ge 10$).
@@ -204,4 +204,4 @@ In this framework, target leakage is eliminated by design:
 - **Ranking vs. Threshold:** Precision at matched recall confirms that SMOTEENN maintains higher precision across recall thresholds (50% to 70%), proving genuine ranking ability beyond cutoff adjustment.
 
 ---
-*Phase 2 execution and report generation completed in 32.8s.*
+*Phase 2 execution and report generation completed in 34.8s.*
