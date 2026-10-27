@@ -4,7 +4,7 @@ main.py – Phase 2 Orchestrator: Supervised Anomaly-Risk Prediction & Feature E
 Orchestrates:
 1. Stage 1: Data validation, split, Box-Plot IQR ground truth labeling, gate checks, sensitivity analysis.
 2. Stage 2: History-only feature construction, multi-variant modeling (SMOTEENN, Balanced, Reference),
-   walk-forward OOF calibration, optimal cutoff selection, test set evaluation, competitive baselines,
+   walk-forward OOF calibration, fixed 0.50 cutoff evaluation, test set evaluation, competitive baselines,
    bootstrap 95% CIs, quarterly drift, feature importance, leak-free feature enrichment, and verification suite.
 """
 
@@ -207,7 +207,7 @@ def main():
     all_variants_data[cfg.PRIMARY_VARIANT]["cv_results"].to_csv(os.path.join(cfg.OUTPUT_DIR, "cv_results.csv"), index=False)
 
     log("### Hyperparameter & Calibration Summary Table")
-    log("| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Optimal Cutoff (F1) | Optimal Cutoff (F2) | Warm-up NaNs |")
+    log("| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Fixed Cutoff (OOF F1) | Fixed Cutoff (OOF F2) | Warm-up NaNs |")
     log("|---|---|---|---|---|---|---|")
     for vname in variants_list:
         vd = all_variants_data[vname]
@@ -240,14 +240,14 @@ def main():
     for bname, bdata in baselines.items():
         log(f"| *Baseline: {bdata['description']}* | Fixed Rule | {bdata['f1']:.4f} | {bdata['precision']:.4f} | {bdata['recall']:.4f} | {bdata['roc_auc']:.4f} | — | {bdata['brier']:.4f} | — | {int(np.sum(y_test))} |")
 
-    # Add Variants (Raw @ 0.50 and Calibrated @ Optimal Cutoff)
+    # Add Variants (Raw @ 0.50 and calibrated @ fixed 0.50 cutoff)
     for vname in variants_list:
         r50 = eval_results[vname]["raw_50"]
         c_opt = eval_results[vname]["cal_opt_f1"]
         c50 = eval_results[vname]["cal_50"]
         log(f"| **{vname.upper()} (Raw)** | 0.50 | {r50['f1']:.4f} | {r50['precision']:.4f} | {r50['recall']:.4f} | {r50['roc_auc']:.4f} | {r50['pr_auc']:.4f} | {r50['brier']:.4f} | {r50['alarms_count']} | {r50['true_anomalies']} |")
         log(f"| **{vname.upper()} (Calibrated @ 0.50)** | 0.50 | {c50['f1']:.4f} | {c50['precision']:.4f} | {c50['recall']:.4f} | {c50['roc_auc']:.4f} | {c50['pr_auc']:.4f} | {c50['brier']:.4f} | {c50['alarms_count']} | {c50['true_anomalies']} |")
-        log(f"| **{vname.upper()} (Calibrated - Primary)** | **{c_opt['cutoff']:.2f}** | **{c_opt['f1']:.4f}** | {c_opt['precision']:.4f} | **{c_opt['recall']:.4f}** | **{c_opt['roc_auc']:.4f}** | **{c_opt['pr_auc']:.4f}** | **{c_opt['brier']:.4f}** | {c_opt['alarms_count']} | {c_opt['true_anomalies']} |")
+        log(f"| **{vname.upper()} (Calibrated - Primary @ 0.50)** | **{c_opt['cutoff']:.2f}** | **{c_opt['f1']:.4f}** | {c_opt['precision']:.4f} | **{c_opt['recall']:.4f}** | **{c_opt['roc_auc']:.4f}** | **{c_opt['pr_auc']:.4f}** | **{c_opt['brier']:.4f}** | {c_opt['alarms_count']} | {c_opt['true_anomalies']} |")
     log("")
 
     # Precision at matched recall
@@ -259,8 +259,8 @@ def main():
         log(f"| **{vname.upper()}** | {pmr['prec_at_recall_50']:.4f} | {pmr['prec_at_recall_60']:.4f} | {pmr['prec_at_recall_70']:.4f} |")
     log("")
 
-    # Bootstrap 95% Confidence Intervals
-    log("### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN, 1000 Resamples)")
+    # Bootstrap 95% Confidence Intervals at the fixed 0.50 cutoff
+    log("### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN, fixed cutoff 0.50, 1000 Resamples)")
     prim_cal_scores = all_variants_data[cfg.PRIMARY_VARIANT]["test_cal_scores"]
     prim_opt_cut = all_variants_data[cfg.PRIMARY_VARIANT]["best_cut_f1"]
     ci_results = bootstrap_ci(y_test.values, prim_cal_scores, prim_opt_cut, n_boot=cfg.BOOTSTRAP_ROUNDS, seed=cfg.SEED)

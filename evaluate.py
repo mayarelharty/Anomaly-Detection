@@ -43,8 +43,8 @@ def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np
     configs = [
         ("raw_50", raw_scores, 0.50, "Raw @ Cutoff 0.50"),
         ("cal_50", cal_scores, 0.50, "Calibrated @ Cutoff 0.50"),
-        ("cal_opt_f1", cal_scores, cutoff_f1, f"Calibrated @ OOF-F1 Cutoff {cutoff_f1:.2f}"),
-        ("cal_opt_f2", cal_scores, cutoff_f2, f"Calibrated @ OOF-F2 Cutoff {cutoff_f2:.2f}"),
+        ("cal_opt_f1", cal_scores, cutoff_f1, f"Calibrated @ Fixed Cutoff {cutoff_f1:.2f}"),
+        ("cal_opt_f2", cal_scores, cutoff_f2, f"Calibrated @ Fixed Cutoff {cutoff_f2:.2f}"),
     ]
 
     for cfg_key, scores, cut, desc in configs:
@@ -311,7 +311,7 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     plt.savefig(os.path.join(output_dir, "calibration_curve.png"), dpi=200)
     plt.close()
 
-    # 4. Confusion Matrix (Primary Variant: SMOTEENN Calibrated @ Optimal Cutoff)
+    # 4. Confusion Matrix (Primary Variant: SMOTEENN Calibrated @ Fixed 0.50 Cutoff)
     prim_data = all_variants_data[cfg.PRIMARY_VARIANT]
     cutoff_opt = prim_data["best_cut_f1"]
     prim_pred = (prim_data["test_cal_scores"] >= cutoff_opt).astype(int)

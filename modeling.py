@@ -106,8 +106,8 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     oof_calibrated = np.full(len(X_train), np.nan)
     oof_calibrated[valid_oof_mask] = calibrator.predict(oof_valid_scores)
 
-    # 4. Find optimal cutoff on OOF calibrated predictions
-    cutoffs = np.linspace(0.5, 0.5, 0.5)
+    # 4. Evaluate the fixed 0.50 decision cutoff on OOF calibrated predictions
+    cutoffs = [0.50]
     best_f1, best_cut_f1 = -1.0, 0.5
     best_f2, best_cut_f2 = -1.0, 0.5
     cal_valid_preds = oof_calibrated[valid_oof_mask]
