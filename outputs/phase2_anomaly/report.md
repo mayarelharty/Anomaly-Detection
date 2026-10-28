@@ -28,14 +28,16 @@
 - Train/Test index overlap: 0 rows (Zero-leakage boundary verified).
 
 ## Label Distribution (Box-Plot IQR Rule)
-- Configuration: `IQR_K = 1.5`, `IQR_SCOPE = 'machine_model'`, `MIN_GROUP_TRAIN = 20`
+- Labelling rule: Box plot: $D < Q_1 - K \times \text{IQR}$ on any of A, P, Q.
+- Configuration: `THRESHOLD_METHOD = 'iqr'`, `IQR_K = 1.5`, `IQR_SCOPE = 'machine_model'`, `MIN_GROUP_TRAIN = 20`
 
 ### Global Training Fences
-| Dimension | Lower Fence | Description |
-|---|---|---|
-| Availability (A) | **0.0707** | $Q_1 - 1.5 \times \text{IQR}$ on Train |
-| Performance (P) | **0.3440** | $Q_1 - 1.5 \times \text{IQR}$ on Train |
-| Quality (Q) | **0.8100** | $Q_1 - 1.5 \times \text{IQR}$ on Train |
+| Dimension | Lower Fence | Description | Used for $y_{\text{anom}}$ |
+|---|---|---|---|
+| Availability (A) | **0.0707** | $Q_1 - 1.5 \times \text{IQR}$ on Train | Yes |
+| Performance (P) | **0.3440** | $Q_1 - 1.5 \times \text{IQR}$ on Train | Yes |
+| Quality (Q) | **0.8100** | $Q_1 - 1.5 \times \text{IQR}$ on Train | Yes |
+| OEE | **0.0131** | $Q_1 - 1.5 \times \text{IQR}$ on Train | No |
 
 ### Machine & Model Group Fences (Train)
 - Total groups in training: 16 met threshold $\ge 20$ rows.
@@ -86,6 +88,15 @@
 | 2026Q1 | 127 | 8 | **6.30%** | Test Period |
 | 2026Q2 | 99 | 18 | **18.18%** | Test Period |
 
+### Threshold Alternatives (Documented Fallback Strategy)
+> All alternatives use fences learned on the training period only. Alternative A is applied automatically when the box-plot rule yields < 50 training anomalies; B and C are selectable via `THRESHOLD_METHOD`. Alternative C (static targets) can flag most shifts in plants with realistic drift.
+| Alternative | Method | Rule | Train Anomalies | Train Rate | Test Anomalies | Test Rate | Gate | Used |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Box plot (default) | iqr | Box plot: $D < Q_1 - K \times \text{IQR}$ on any of A, P, Q | 179 | 13.39% | 44 | 7.53% | PASS | ✓ |
+| Alternative A | percentile | Alt A: $D < P_{10}$ on any of A, P, Q | 347 | 25.95% | 108 | 18.49% | PASS |  |
+| Alternative B | oee | Alt B: $\text{OEE} < Q_1 - K \times \text{IQR}$ (single composite fence) | 16 | 1.20% | 6 | 1.03% | FAIL |  |
+| Alternative C | benchmark | Alt C: $A < 0.90 \lor P < 0.95 \lor Q < 0.999$ (static industry targets) | 1336 | 99.93% | 584 | 100.00% | FAIL |  |
+
 ### Threshold Sensitivity Analysis (K $\times$ Scope)
 > Note: This sensitivity table is provided for audit purposes only; the pipeline strictly uses the pre-declared headline configuration (`IQR_K = 1.5`, `scope = 'machine_model'`).
 | Scope | IQR_K | Train Anomalies | Train Rate | Test Anomalies | Test Rate | Gate | Dim Warning |
@@ -98,12 +109,12 @@
 | machine_model | 3.0 | 86 | 6.43% | 15 | 2.57% | PASS | Yes (<10 in A/P/Q) |
 
 ## 4. Label Gate Verification
-- **Gate Status:** PASSED ✓ (Training anomalies $\ge 50$, Test anomalies $\ge 10$).
+- **Gate Status:** PASSED ✓ (Training minority class $\ge 50$, Test rows $\ge 10$ in each class).
 - Warning check: Dimension A has 4 training positives (Flagged as sparse outlier dimension).
 
 ## 5. Feature Engineering: History-Only Strictness
 - Feature mode: `history_only` strictly enforced.
-- Allowed features (27): `['machine_code', 'model_code', 'day_of_week', 'month', 'lag1_Availability', 'roll5_Availability', 'lag1_Performance', 'roll5_Performance', 'lag1_Quality', 'roll5_Quality', 'lag1_y_anom', 'roll5_y_anom', 'days_since_prev', 'margin1_Availability', 'margin_min5_Availability', 'trend_Availability', 'std5_Availability', 'margin1_Performance', 'margin_min5_Performance', 'trend_Performance', 'std5_Performance', 'margin1_Quality', 'margin_min5_Quality', 'trend_Quality', 'std5_Quality', 'runs_since_anom', 'anom_count10']`.
+- Allowed features (12): `['machine_code', 'model_code', 'day_of_week', 'month', 'lag1_Availability', 'roll5_Availability', 'lag1_Performance', 'roll5_Performance', 'lag1_Quality', 'roll5_Quality', 'lag1_y_anom', 'roll5_y_anom']`.
 - First-run shifts dropped due to lack of prior operating history: Train = 17, Test = 0.
 - Effective modeling dataset: Train = 1320 shifts, Test = 584 shifts.
 - **Forbidden Feature Audit:** 0 forbidden current-shift parameters in X (Operating time, Downtime, Production, Defects, A, P, Q, OEE strictly absent).
@@ -117,65 +128,92 @@
   1. **Variant A (`smoteenn`) [PRIMARY]:** Resampling with `SMOTENC` on categorical codes, applied strictly inside training folds.
   2. **Variant B (`balanced`):** Cost-sensitive `class_weight='balanced'`, no synthetic data generation.
   3. **Variant C (`reference`):** Unweighted, unresampled standard Random Forest.
+- **Configuration modes:** `FEATURE_SET = 'spec'`, `TUNING_MODE = 'spec'`, `CUTOFF_MODE = 'oof_f1'`, `THRESHOLD_METHOD = 'iqr'` (grid scoring `f1`). All modes match the specification defaults.
 
 ### Hyperparameter & Calibration Summary Table
-| Variant | Best Parameters | Best CV PR-AUC | OOF ROC-AUC | Decision Cutoff (Raw) | OOF F1 @ Cutoff | OOF F2 @ Cutoff | Warm-up NaNs |
+| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Alarm Scores | Cutoff (OOF F1) | Cutoff (OOF F2) | Warm-up NaNs |
 |---|---|---|---|---|---|---|---|
-| **SMOTEENN** | `depth=10, leaf=20, max_feat=0.5, n_est=300` | 0.1624 | 0.5673 | **0.50** | 0.1712 | 0.2039 | 220 shifts |
-| **BALANCED** | `depth=None, leaf=20, max_feat=sqrt, n_est=300` | 0.1395 | 0.5823 | **0.50** | 0.1778 | 0.2030 | 220 shifts |
-| **REFERENCE** | `depth=5, leaf=20, max_feat=sqrt, n_est=300` | 0.1601 | 0.6239 | **0.50** | 0.0000 | 0.0000 | 220 shifts |
+| **SMOTEENN** | `max_depth=None, n_estimators=100` | 0.1007 | 0.5247 | calibrated | **0.09** (F1=0.1877) | 0.01 (F2=0.3501) | 220 shifts |
+| **BALANCED** | `max_depth=10, n_estimators=100` | 0.1133 | 0.5426 | calibrated | **0.09** (F1=0.1945) | 0.06 (F2=0.3574) | 220 shifts |
+| **REFERENCE** | `max_depth=None, n_estimators=100` | 0.0170 | 0.5580 | calibrated | **0.09** (F1=0.1978) | 0.05 (F2=0.3612) | 220 shifts |
 
 ## 7. Test Period Performance & Benchmark Comparison
 ### Multi-Variant & Baseline Performance Comparison (Test Set, N = 584)
-| Model / Variant | Decision Cutoff | F1 Score | Precision | Recall | ROC-AUC | PR-AUC | Brier Score | Alarms Raised | True Anomalies |
-|---|---|---|---|---|---|---|---|---|---|
-| *Baseline: Always Predict Normal (Majority Class)* | Fixed Rule | 0.0000 | 0.0000 | 0.0000 | 0.5000 | — | 0.0753 | — | 44 |
-| *Baseline: Previous-Run Label Persistence* | Fixed Rule | 0.1707 | 0.1842 | 0.1591 | 0.5508 | — | 0.1164 | — | 44 |
-| *Baseline: Per Machine+Model Training Base Rate* | Fixed Rule | 0.1491 | 0.0810 | 0.9318 | 0.5626 | — | 0.0730 | — | 44 |
-| **SMOTEENN (Raw - Primary)** | **0.50** | **0.1786** | 0.1471 | **0.2273** | **0.5687** | **0.1325** | 0.1297 | 68 | 44 |
-| SMOTEENN (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.5889 | 0.1097 | **0.0694** | 0 | 44 |
-| **BALANCED (Raw)** | **0.50** | **0.1609** | 0.1628 | **0.1591** | **0.6425** | **0.1373** | 0.1256 | 43 | 44 |
-| BALANCED (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.6431 | 0.1189 | **0.0684** | 0 | 44 |
-| **REFERENCE (Raw)** | **0.50** | **0.0000** | 0.0000 | **0.0000** | **0.6446** | **0.1611** | 0.0682 | 0 | 44 |
-| REFERENCE (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.6250 | 0.1189 | **0.0692** | 0 | 44 |
+| Model / Variant | Decision Cutoff | F1 Score | Precision | Recall | Accuracy | ROC-AUC | PR-AUC | Brier Score | Alarms Raised | True Anomalies |
+|---|---|---|---|---|---|---|---|---|---|---|
+| *Baseline: Always Predict Normal (Majority Class)* | Fixed Rule | 0.0000 | 0.0000 | 0.0000 | 0.9247 | 0.5000 | — | 0.0753 | — | 44 |
+| *Baseline: Previous-Run Label Persistence* | Fixed Rule | 0.1707 | 0.1842 | 0.1591 | 0.8836 | 0.5508 | — | 0.1164 | — | 44 |
+| *Baseline: Per Machine+Model Training Base Rate* | Fixed Rule | 0.1491 | 0.0810 | 0.9318 | 0.1986 | 0.5626 | — | 0.0730 | — | 44 |
+| SMOTEENN (Raw @ 0.50) | 0.50 | 0.1443 | 0.1321 | 0.1591 | 0.8579 | 0.5758 | 0.1126 | 0.1185 | 53 | 44 |
+| SMOTEENN (Calibrated @ 0.50) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.9247 | 0.5733 | 0.0935 | 0.0698 | 0 | 44 |
+| **SMOTEENN (Calibrated @ OOF-F1 cutoff 0.09 - Primary)** | **0.09** | **0.1688** | 0.0978 | **0.6136** | 0.5445 | 0.5733 | 0.0935 | 0.0698 | 276 | 44 |
+| SMOTEENN (Calibrated @ OOF-F2 cutoff 0.01) | 0.01 | 0.1401 | 0.0753 | 1.0000 | 0.0753 | 0.5733 | 0.0935 | 0.0698 | 584 | 44 |
+| BALANCED (Raw @ 0.50) | 0.50 | 0.1017 | 0.2000 | 0.0682 | 0.9092 | 0.5556 | 0.1275 | 0.1047 | 15 | 44 |
+| BALANCED (Calibrated @ 0.50) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.9247 | 0.5648 | 0.0902 | 0.0698 | 0 | 44 |
+| **BALANCED (Calibrated @ OOF-F1 cutoff 0.09)** | **0.09** | **0.1659** | 0.1027 | **0.4318** | 0.6729 | 0.5648 | 0.0902 | 0.0698 | 185 | 44 |
+| BALANCED (Calibrated @ OOF-F2 cutoff 0.06) | 0.06 | 0.1434 | 0.0777 | 0.9318 | 0.1610 | 0.5648 | 0.0902 | 0.0698 | 528 | 44 |
+| REFERENCE (Raw @ 0.50) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.9247 | 0.6224 | 0.1387 | 0.0705 | 0 | 44 |
+| REFERENCE (Calibrated @ 0.50) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.9247 | 0.6160 | 0.1088 | 0.0692 | 0 | 44 |
+| **REFERENCE (Calibrated @ OOF-F1 cutoff 0.09)** | **0.09** | **0.1370** | 0.1724 | **0.1136** | 0.8921 | 0.6160 | 0.1088 | 0.0692 | 29 | 44 |
+| REFERENCE (Calibrated @ OOF-F2 cutoff 0.05) | 0.05 | 0.1594 | 0.0899 | 0.7045 | 0.4401 | 0.6160 | 0.1088 | 0.0692 | 345 | 44 |
 
-> **Cutoff note:** Isotonic calibration maps scores to observed anomaly frequencies (max calibrated test score = 0.2051), so a fixed cutoff of 0.50 on calibrated probabilities raises no alarms. Alarms are therefore issued on raw scores; calibrated scores are reported as risk probabilities (Brier score, `Anomaly_Score`).
+> **Cutoff note:** Isotonic calibration maps scores to observed anomaly frequencies (max calibrated test score = 0.1429), so a 0.50 cutoff on calibrated probabilities raises no alarms. The specification therefore selects the F1-optimal cutoff on calibrated OOF predictions.
+
+### Classification Report & Confusion Matrix (SMOTEENN, Calibrated @ OOF-F1 cutoff 0.09)
+| Class | Precision | Recall | F1 Score | Support |
+|---|---|---|---|---|
+| Normal (0) | 0.9448 | 0.5389 | 0.6863 | 540 |
+| Anomaly (1) | 0.0978 | 0.6136 | 0.1688 | 44 |
+| Macro avg | 0.5213 | 0.5763 | 0.4275 | 584 |
+| Weighted avg | 0.8810 | 0.5445 | 0.6473 | 584 |
+| Accuracy | | | 0.5445 | 584 |
+
+- Confusion matrix: TN = 291, FP = 249, FN = 17, TP = 27.
 
 ### Precision at Matched Recall Levels (Disentangling Ranking vs. Cutoff Tuning)
 | Variant | Precision @ Recall = 50% | Precision @ Recall = 60% | Precision @ Recall = 70% |
 |---|---|---|---|
-| **SMOTEENN** | 0.0931 | 0.0897 | 0.0882 |
-| **BALANCED** | 0.1302 | 0.1049 | 0.1003 |
-| **REFERENCE** | 0.1152 | 0.1067 | 0.0984 |
+| **SMOTEENN** | 0.0978 | 0.0978 | 0.0753 |
+| **BALANCED** | 0.0924 | 0.0777 | 0.0777 |
+| **REFERENCE** | 0.1169 | 0.1169 | 0.0899 |
 
-### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN Raw, cutoff 0.50, 1000 Resamples)
+### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN, Calibrated @ OOF-F1 cutoff 0.09, 1000 Resamples)
 | Metric | Point Estimate | 95% Confidence Interval | Note |
 |---|---|---|---|
-| **F1** | 0.1786 | **[0.0816, 0.2748]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **PRECISION** | 0.1471 | **[0.0645, 0.2361]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **RECALL** | 0.2273 | **[0.1020, 0.3612]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **ROC_AUC** | 0.5687 | **[0.4759, 0.6567]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **PR_AUC** | 0.1325 | **[0.0725, 0.2278]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **F1** | 0.1688 | **[0.1132, 0.2209]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **PRECISION** | 0.0978 | **[0.0638, 0.1326]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **RECALL** | 0.6136 | **[0.4782, 0.7500]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **ROC_AUC** | 0.5733 | **[0.4933, 0.6549]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **PR_AUC** | 0.0935 | **[0.0643, 0.1379]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+
+### Baseline Outperformance Verdict (Primary Variant)
+| Baseline | Baseline F1 | Model F1 | Beats on F1? | Baseline ROC-AUC | Model ROC-AUC | Beats on ROC-AUC? | Baseline F1 outside model's 95% CI? |
+|---|---|---|---|---|---|---|---|
+| Always Predict Normal (Majority Class) | 0.0000 | 0.1688 | Yes | 0.5000 | 0.5733 | Yes | Yes |
+| Previous-Run Label Persistence | 0.1707 | 0.1688 | No | 0.5508 | 0.5733 | Yes | No |
+| Per Machine+Model Training Base Rate | 0.1491 | 0.1688 | Yes | 0.5626 | 0.5733 | Yes | No |
+
+- **Outperforms all three baselines on F1:** No. **On ROC-AUC:** Yes. A baseline F1 inside the model's 95% CI [0.1132, 0.2209] means the difference is not statistically distinguishable on this test set.
 
 ### Temporal Drift: Test Performance by Calendar Quarter
 | Quarter | Total Shifts | True Anomalies | Prevalence | F1 Score | Recall | Precision | ROC-AUC |
 |---|---|---|---|---|---|---|---|
-| **2025Q2** | 21 | 1 | 4.76% | 0.0000 | 0.0000 | 0.0000 | 0.4000 |
-| **2025Q3** | 204 | 11 | 5.39% | 0.1429 | 0.1818 | 0.1176 | 0.5883 |
-| **2025Q4** | 133 | 6 | 4.51% | 0.0000 | 0.0000 | 0.0000 | 0.5171 |
-| **2026Q1** | 127 | 8 | 6.30% | 0.1176 | 0.2500 | 0.0769 | 0.4076 |
-| **2026Q2** | 99 | 18 | 18.18% | 0.3158 | 0.3333 | 0.3000 | 0.6385 |
+| **2025Q2** | 21 | 1 | 4.76% | 0.0000 | 0.0000 | 0.0000 | 0.3250 |
+| **2025Q3** | 204 | 11 | 5.39% | 0.0920 | 0.3636 | 0.0526 | 0.4701 |
+| **2025Q4** | 133 | 6 | 4.51% | 0.1067 | 0.6667 | 0.0580 | 0.6129 |
+| **2026Q1** | 127 | 8 | 6.30% | 0.0882 | 0.3750 | 0.0500 | 0.3981 |
+| **2026Q2** | 99 | 18 | 18.18% | 0.3951 | 0.8889 | 0.2540 | 0.6680 |
 
 ### Per-Dimension Anomaly Capture (Primary Variant)
 | Dimension | Test Outliers | Model Recall | Precision | F1 Score | Finding |
 |---|---|---|---|---|---|
-| **Availability** | 8 | **25.00%** | 2.94% | 0.0526 | Process anomaly alignment |
-| **Performance** | 14 | **35.71%** | 7.35% | 0.1220 | Process anomaly alignment |
-| **Quality** | 23 | **13.04%** | 4.41% | 0.0659 | Process anomaly alignment |
+| **Availability** | 8 | **50.00%** | 1.45% | 0.0282 | Process anomaly alignment |
+| **Performance** | 14 | **71.43%** | 3.62% | 0.0690 | Process anomaly alignment |
+| **Quality** | 23 | **56.52%** | 4.71% | 0.0870 | Process anomaly alignment |
 
 ## 8. Feature Enrichment & Deliverable Generation
 - Enriched dataset created: `1921 rows` $\times$ `28 columns`.
-- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary risk probability), `Anomaly_Score_raw` (primary alarm score, alarm if ≥ 0.50), and cross-variant columns.
+- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary risk probability), `Anomaly_Score_raw`, and cross-variant columns. Primary alarm rule: `Anomaly_Score` ≥ 0.09.
 - **In-Sample Score Removal:** Optimistic in-sample training scores strictly eliminated; training rows contain out-of-fold calibrated probabilities.
 
 ## 9. Verification Suite & Diagnostic Quality Audit
@@ -185,9 +223,9 @@
 | **2 Lag Strictness** | **PASS** | Verified 1904 consecutive run transitions; 0 lag-leakage violations. |
 | **3 Fences Train Only** | **PASS** | Fences identically reproduced from train period; 0 dependence on test rows. |
 | **4 No Resampling Leakage** | **PASS** | Test evaluation strictly preserved row count (584 rows); no test resampling. |
-| **5 Oof Recomputation** | **PASS** | Recomputed fold 5 OOF probabilities match recorded scores within 3.89e-16. |
-| **6 Label Shuffle** | **PASS** | Null label model achieved chance ROC-AUC = 0.4692 (expected ~0.50). |
-| **7 Seed Stability** | **PASS** | 5-seed stability verified across [42, 7, 123, 999, 2024]: mean AUC = 0.6183, std = 0.0103 (< 0.05). |
+| **5 Oof Recomputation** | **PASS** | Recomputed fold 5 OOF probabilities match recorded scores within 0.00e+00. |
+| **6 Label Shuffle** | **PASS** | Null label model achieved chance ROC-AUC = 0.5105 (expected ~0.50). |
+| **7 Seed Stability** | **PASS** | 5-seed stability verified across [42, 7, 123, 999, 2024]: mean AUC = 0.5663, std = 0.0156 (< 0.05). |
 
 ## 10. Leakage & Methodological Discussion
 ### 1. Leakage Safeguards in History-Only Mode
@@ -199,8 +237,8 @@ In this framework, target leakage is eliminated by design:
 
 ### 2. Physical & Statistical Interpretation of Results
 - **Why is test F1 lower than same_row mode?** In `same_row` mode, the model was recovering an exact mathematical formula (an algebraic tautology), yielding an artificial F1 > 0.70. In `history_only` mode, the model is performing genuine predictive forecasting of industrial degradation from historical telemetry alone.
-- **Comparison with Baselines:** At the fixed cutoff 0.50, the primary model (SMOTEENN raw) achieves **F1 = 0.1786**, **Recall = 22.73%**, **Precision = 14.71%** (68 alarms) and **PR-AUC = 0.1325** vs. test prevalence 0.0753. The strongest fixed-rule baseline (Previous-Run Label Persistence) reaches F1 = 0.1707.
-- **Ranking vs. Threshold:** Precision at matched recall (raw scores) isolates ranking quality from the cutoff choice; highest precision by recall level: 50% → BALANCED, 60% → REFERENCE, 70% → BALANCED.
+- **Comparison with Baselines:** The primary model (SMOTEENN, Calibrated @ OOF-F1 cutoff 0.09) achieves **F1 = 0.1688**, **Recall = 61.36%**, **Precision = 9.78%** (276 alarms) and **PR-AUC = 0.0935** vs. test prevalence 0.0753. The strongest fixed-rule baseline (Previous-Run Label Persistence) reaches F1 = 0.1707.
+- **Ranking vs. Threshold:** Precision at matched recall (alarm scores) isolates ranking quality from the cutoff choice; highest precision by recall level: 50% → REFERENCE, 60% → REFERENCE, 70% → REFERENCE.
 
 ---
-*Phase 2 execution and report generation completed in 153.9s.*
+*Phase 2 execution and report generation completed in 35.2s.*

@@ -96,6 +96,23 @@ class ScaledFeatureSelector(BaseEstimator, TransformerMixin):
         return np.array(self.keep_columns_)
 
 
+# Spec history-only feature set (codes first: SMOTENC categorical indices 0-3)
+SPEC_FEATURES = [
+    "machine_code", "model_code", "day_of_week", "month",
+    "lag1_Availability", "roll5_Availability",
+    "lag1_Performance",  "roll5_Performance",
+    "lag1_Quality",      "roll5_Quality",
+    "lag1_y_anom",       "roll5_y_anom",
+]
+# FEATURE_SET = "extended" adds fence margins, trend/volatility and recency
+EXTENDED_FEATURES = [
+    "days_since_prev",
+    "margin1_Availability", "margin_min5_Availability", "trend_Availability", "std5_Availability",
+    "margin1_Performance",  "margin_min5_Performance",  "trend_Performance",  "std5_Performance",
+    "margin1_Quality",      "margin_min5_Quality",      "trend_Quality",      "std5_Quality",
+    "runs_since_anom", "anom_count10",
+]
+
 RECENCY_CAP = 20  # runs_since_anom value when no anomaly seen in the group yet (and upper cap)
 
 
@@ -115,9 +132,11 @@ def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Ser
                            global_fences: dict, group_fences: dict):
     """
     Construct strictly historical features per machine + model:
-    - machine_code, model_code, day_of_week, month, days_since_prev
+    - machine_code, model_code, day_of_week, month
     - lag-1 of A, P, Q, y_anom
     - rolling-5 (shifted, mean of previous up to 5 runs) of A, P, Q, y_anom
+    FEATURE_SET = "extended" additionally selects:
+    - days_since_prev
     - fence margins: lag-1 and rolling-5 minimum of A, P, Q minus the group's training fence
     - trend / volatility: lag-1 minus rolling-5 mean, rolling-5 std of A, P, Q
     - recency: runs since last anomaly, anomaly count in previous 10 runs
@@ -179,18 +198,7 @@ def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Ser
                .transform(lambda s: s.shift(1).rolling(10, min_periods=1).sum())
     )
 
-    feature_cols = [
-        "machine_code", "model_code", "day_of_week", "month",
-        "lag1_Availability", "roll5_Availability",
-        "lag1_Performance",  "roll5_Performance",
-        "lag1_Quality",      "roll5_Quality",
-        "lag1_y_anom",       "roll5_y_anom",
-        "days_since_prev",
-        "margin1_Availability", "margin_min5_Availability", "trend_Availability", "std5_Availability",
-        "margin1_Performance",  "margin_min5_Performance",  "trend_Performance",  "std5_Performance",
-        "margin1_Quality",      "margin_min5_Quality",      "trend_Quality",      "std5_Quality",
-        "runs_since_anom", "anom_count10",
-    ]
+    feature_cols = SPEC_FEATURES + (EXTENDED_FEATURES if cfg.FEATURE_SET == "extended" else [])
 
     # Check for forbidden columns
     for fc in FORBIDDEN_COLUMNS:

@@ -26,7 +26,7 @@ import config as cfg
 from data import load_and_clean, sanity_checks, validate_oee, split_data
 from eda import run_eda
 from labels import (
-    compute_fences, apply_fences, gate_check,
+    resolve_labels, run_alternatives_table, gate_check,
     label_distribution_report, run_sensitivity_table, plot_boxplot_with_fences
 )
 from features import build_history_features, build_same_row_diagnostic
@@ -109,18 +109,29 @@ def main():
     log(f"- Train/Test index overlap: {len(set(train_idx) & set(test_idx))} rows (Zero-leakage boundary verified).")
     log("")
 
-    # ── 5. Ground Truth Labeling (IQR Rule) ────────────────
-    global_fences, group_fences, group_counts = compute_fences(train_df, k=cfg.IQR_K, scope=cfg.IQR_SCOPE)
-    train_labels = apply_fences(train_df, global_fences, group_fences, scope=cfg.IQR_SCOPE)
-    test_labels  = apply_fences(test_df,  global_fences, group_fences, scope=cfg.IQR_SCOPE)
+    # ── 5. Ground Truth Labeling (IQR Rule, with Alt A fallback) ──
+    label_method, global_fences, group_fences, train_labels, test_labels, fallback_note = resolve_labels(train_df, test_df)
     df_labels_full = pd.concat([train_labels, test_labels]).sort_index()
 
     plot_boxplot_with_fences(train_df, global_fences, cfg.OUTPUT_DIR)
 
     label_report_text = label_distribution_report(
-        df, train_labels, test_labels, train_idx, test_idx, global_fences, group_fences
+        df, train_labels, test_labels, train_idx, test_idx, global_fences, group_fences, method=label_method
     )
     log(label_report_text)
+    if fallback_note:
+        log(f"> **Automatic fallback:** {fallback_note}")
+        log("")
+
+    # ── 5b. Documented threshold alternatives ──────────────
+    log("### Threshold Alternatives (Documented Fallback Strategy)")
+    log("> All alternatives use fences learned on the training period only. Alternative A is applied automatically "
+        f"when the box-plot rule yields < {cfg.MIN_MINORITY_TRAIN} training anomalies; B and C are selectable via "
+        "`THRESHOLD_METHOD`. Alternative C (static targets) can flag most shifts in plants with realistic drift.")
+    alt_df = run_alternatives_table(train_df, test_df)
+    alt_df["Used"] = np.where(alt_df["Method"] == label_method, "✓", "")
+    log(df_to_markdown(alt_df))
+    log("")
 
     # ── 6. Sensitivity Table ───────────────────────────────
     log("### Threshold Sensitivity Analysis (K $\\times$ Scope)")
@@ -131,12 +142,15 @@ def main():
 
     # ── 7. Gate Check ──────────────────────────────────────
     log("## 4. Label Gate Verification")
-    gate_ok = gate_check(train_labels, test_labels)
+    gate_ok, gate_msgs = gate_check(train_labels, test_labels, alternatives=alt_df)
     if not gate_ok:
         log("### GATE STATUS: FAILED ✗ – Halting execution.")
+        for m in gate_msgs:
+            log(f"- {m}")
         _write_report(report_sections)
         sys.exit(1)
-    log("- **Gate Status:** PASSED ✓ (Training anomalies $\\ge 50$, Test anomalies $\\ge 10$).")
+    log(f"- **Gate Status:** PASSED ✓ (Training minority class $\\ge {cfg.MIN_MINORITY_TRAIN}$, "
+        f"Test rows $\\ge {cfg.MIN_MINORITY_TEST}$ in each class).")
     log(f"- Warning check: Dimension A has {train_labels['anom_A'].sum()} training positives (Flagged as sparse outlier dimension).")
     log("")
 
@@ -183,6 +197,13 @@ def main():
     log("  1. **Variant A (`smoteenn`) [PRIMARY]:** Resampling with `SMOTENC` on categorical codes, applied strictly inside training folds.")
     log("  2. **Variant B (`balanced`):** Cost-sensitive `class_weight='balanced'`, no synthetic data generation.")
     log("  3. **Variant C (`reference`):** Unweighted, unresampled standard Random Forest.")
+    modes = {"FEATURE_SET": cfg.FEATURE_SET, "TUNING_MODE": cfg.TUNING_MODE, "CUTOFF_MODE": cfg.CUTOFF_MODE,
+             "THRESHOLD_METHOD": label_method}
+    deviations = [k for k, v in modes.items() if v != cfg.SPEC_DEFAULTS[k]]
+    log("- **Configuration modes:** " + ", ".join(f"`{k} = '{v}'`" for k, v in modes.items())
+        + f" (grid scoring `{cfg.GRID_SCORING}`). "
+        + ("All modes match the specification defaults." if not deviations
+           else f"Deviations from the specification: {', '.join(f'`{d}`' for d in deviations)}."))
     log("")
 
     variants_list = ["smoteenn", "balanced", "reference"]
@@ -208,13 +229,13 @@ def main():
     all_variants_data[cfg.PRIMARY_VARIANT]["cv_results"].to_csv(os.path.join(cfg.OUTPUT_DIR, "cv_results.csv"), index=False)
 
     log("### Hyperparameter & Calibration Summary Table")
-    log("| Variant | Best Parameters | Best CV PR-AUC | OOF ROC-AUC | Decision Cutoff (Raw) | OOF F1 @ Cutoff | OOF F2 @ Cutoff | Warm-up NaNs |")
+    cv_lbl = {"f1": "F1", "average_precision": "PR-AUC"}.get(cfg.GRID_SCORING, cfg.GRID_SCORING)
+    log(f"| Variant | Best Parameters | Best CV {cv_lbl} | OOF ROC-AUC | Alarm Scores | Cutoff (OOF F1) | Cutoff (OOF F2) | Warm-up NaNs |")
     log("|---|---|---|---|---|---|---|---|")
     for vname in variants_list:
         vd = all_variants_data[vname]
-        bp = vd["best_params"]
-        bp_str = f"depth={bp['clf__max_depth']}, leaf={bp['clf__min_samples_leaf']}, max_feat={bp['clf__max_features']}, n_est={bp['clf__n_estimators']}"
-        log(f"| **{vname.upper()}** | `{bp_str}` | {vd['best_cv_score']:.4f} | {vd['oof_auc']:.4f} | **{vd['cutoff']:.2f}** | {vd['oof_f1']:.4f} | {vd['oof_f2']:.4f} | {vd['warm_up_nans']} shifts |")
+        bp_str = ", ".join(f"{k.replace('clf__', '')}={v}" for k, v in vd["best_params"].items())
+        log(f"| **{vname.upper()}** | `{bp_str}` | {vd['best_cv_score']:.4f} | {vd['oof_auc']:.4f} | {vd['score_type']} | **{vd['cutoff']:.2f}** (F1={vd['oof_f1']:.4f}) | {vd['cutoff_f2']:.2f} (F2={vd['oof_f2']:.4f}) | {vd['warm_up_nans']} shifts |")
     log("")
 
     # ── 9. Test Period Evaluation & Multi-Variant Comparison ─
@@ -222,9 +243,7 @@ def main():
     eval_results = {}
     for vname in variants_list:
         vd = all_variants_data[vname]
-        eval_results[vname] = evaluate_single_variant(
-            vname, y_test, vd["test_raw_scores"], vd["test_cal_scores"], cutoff=vd["cutoff"]
-        )
+        eval_results[vname] = evaluate_single_variant(vname, y_test, vd)
 
     # Compute baselines
     train_group_df = df.loc[valid_train_idx].copy()
@@ -233,26 +252,51 @@ def main():
     baselines = compute_baselines(y_test, X_test, train_group_rates, feat_data["full_feat_df"], valid_test_idx)
 
     # Comparison Table
-    log("### Multi-Variant & Baseline Performance Comparison (Test Set, N = 584)")
-    log("| Model / Variant | Decision Cutoff | F1 Score | Precision | Recall | ROC-AUC | PR-AUC | Brier Score | Alarms Raised | True Anomalies |")
-    log("|---|---|---|---|---|---|---|---|---|---|")
+    n_test, n_anom_test = len(y_test), int(np.sum(y_test))
+    log(f"### Multi-Variant & Baseline Performance Comparison (Test Set, N = {n_test})")
+    log("| Model / Variant | Decision Cutoff | F1 Score | Precision | Recall | Accuracy | ROC-AUC | PR-AUC | Brier Score | Alarms Raised | True Anomalies |")
+    log("|---|---|---|---|---|---|---|---|---|---|---|")
 
     # Add Baselines
     for bname, bdata in baselines.items():
-        log(f"| *Baseline: {bdata['description']}* | Fixed Rule | {bdata['f1']:.4f} | {bdata['precision']:.4f} | {bdata['recall']:.4f} | {bdata['roc_auc']:.4f} | — | {bdata['brier']:.4f} | — | {int(np.sum(y_test))} |")
+        log(f"| *Baseline: {bdata['description']}* | Fixed Rule | {bdata['f1']:.4f} | {bdata['precision']:.4f} | {bdata['recall']:.4f} | {bdata['accuracy']:.4f} | {bdata['roc_auc']:.4f} | — | {bdata['brier']:.4f} | — | {n_anom_test} |")
 
-    # Add Variants (raw = primary alarm signal; calibrated shown for probability quality / Brier)
+    # Add Variants: raw and calibrated @ 0.50 (spec reference points), then the selected alarm configuration
+    def _row(label, r, bold=False):
+        b = "**" if bold else ""
+        return (f"| {b}{label}{b} | {b}{r['cutoff']:.2f}{b} | {b}{r['f1']:.4f}{b} | {r['precision']:.4f} | {b}{r['recall']:.4f}{b} | "
+                f"{r['accuracy']:.4f} | {r['roc_auc']:.4f} | {r['pr_auc']:.4f} | {r['brier']:.4f} | {r['alarms_count']} | {r['true_anomalies']} |")
     for vname in variants_list:
-        r = eval_results[vname]["raw"]
-        c = eval_results[vname]["calibrated"]
-        raw_lbl = "Raw - Primary" if vname == cfg.PRIMARY_VARIANT else "Raw"
-        log(f"| **{vname.upper()} ({raw_lbl})** | **{r['cutoff']:.2f}** | **{r['f1']:.4f}** | {r['precision']:.4f} | **{r['recall']:.4f}** | **{r['roc_auc']:.4f}** | **{r['pr_auc']:.4f}** | {r['brier']:.4f} | {r['alarms_count']} | {r['true_anomalies']} |")
-        log(f"| {vname.upper()} (Calibrated) | {c['cutoff']:.2f} | {c['f1']:.4f} | {c['precision']:.4f} | {c['recall']:.4f} | {c['roc_auc']:.4f} | {c['pr_auc']:.4f} | **{c['brier']:.4f}** | {c['alarms_count']} | {c['true_anomalies']} |")
+        vd, ev = all_variants_data[vname], eval_results[vname]
+        tag = " - Primary" if vname == cfg.PRIMARY_VARIANT else ""
+        for key, lbl, stype in [("raw_50", "Raw @ 0.50", "raw"), ("cal_50", "Calibrated @ 0.50", "calibrated")]:
+            if not (vd["score_type"] == stype and vd["cutoff"] == 0.50):   # skip duplicate of the selected configuration
+                log(_row(f"{vname.upper()} ({lbl})", ev[key]))
+        log(_row(f"{vname.upper()} ({ev['primary']['description']}{tag})", ev["primary"], bold=True))
+        if vd["cutoff_f2"] != vd["cutoff"]:
+            log(_row(f"{vname.upper()} ({ev['primary_f2']['description']})", ev["primary_f2"]))
     log("")
     max_cal = max(float(np.max(all_variants_data[v]["test_cal_scores"])) for v in variants_list)
-    log(f"> **Cutoff note:** Isotonic calibration maps scores to observed anomaly frequencies (max calibrated test score = {max_cal:.4f}), "
-        f"so a fixed cutoff of {cfg.DECISION_CUTOFF:.2f} on calibrated probabilities raises no alarms. Alarms are therefore issued on raw scores; "
-        "calibrated scores are reported as risk probabilities (Brier score, `Anomaly_Score`).")
+    if max_cal < 0.50:
+        log(f"> **Cutoff note:** Isotonic calibration maps scores to observed anomaly frequencies (max calibrated test score = {max_cal:.4f}), "
+            "so a 0.50 cutoff on calibrated probabilities raises no alarms. "
+            + ("The specification therefore selects the F1-optimal cutoff on calibrated OOF predictions."
+               if cfg.CUTOFF_MODE == "oof_f1" else
+               f"With `CUTOFF_MODE = 'fixed_raw'`, alarms are issued on raw scores at {cfg.DECISION_CUTOFF:.2f}."))
+        log("")
+
+    # Classification report (primary variant, selected configuration)
+    c_prim = eval_results[cfg.PRIMARY_VARIANT]["primary"]
+    log(f"### Classification Report & Confusion Matrix ({cfg.PRIMARY_VARIANT.upper()}, {c_prim['description']})")
+    log("| Class | Precision | Recall | F1 Score | Support |")
+    log("|---|---|---|---|---|")
+    cr = c_prim["classification_report"]
+    for cls, name in [("0", "Normal (0)"), ("1", "Anomaly (1)"), ("macro avg", "Macro avg"), ("weighted avg", "Weighted avg")]:
+        log(f"| {name} | {cr[cls]['precision']:.4f} | {cr[cls]['recall']:.4f} | {cr[cls]['f1-score']:.4f} | {int(cr[cls]['support'])} |")
+    log(f"| Accuracy | | | {cr['accuracy']:.4f} | {n_test} |")
+    (tn, fp), (fn, tp) = c_prim["confusion_matrix"]
+    log("")
+    log(f"- Confusion matrix: TN = {tn}, FP = {fp}, FN = {fn}, TP = {tp}.")
     log("")
 
     # Precision at matched recall
@@ -264,16 +308,34 @@ def main():
         log(f"| **{vname.upper()}** | {pmr['prec_at_recall_50']:.4f} | {pmr['prec_at_recall_60']:.4f} | {pmr['prec_at_recall_70']:.4f} |")
     log("")
 
-    # Bootstrap 95% Confidence Intervals at the fixed decision cutoff (raw scores)
-    log(f"### Bootstrap 95% Confidence Intervals (Primary Variant: {cfg.PRIMARY_VARIANT.upper()} Raw, cutoff {cfg.DECISION_CUTOFF:.2f}, {cfg.BOOTSTRAP_ROUNDS} Resamples)")
-    prim_scores = all_variants_data[cfg.PRIMARY_VARIANT]["test_raw_scores"]
+    # Bootstrap 95% Confidence Intervals at the selected cutoff
+    prim_scores = all_variants_data[cfg.PRIMARY_VARIANT]["test_alarm_scores"]
     prim_cut = all_variants_data[cfg.PRIMARY_VARIANT]["cutoff"]
+    log(f"### Bootstrap 95% Confidence Intervals (Primary Variant: {cfg.PRIMARY_VARIANT.upper()}, {c_prim['description']}, {cfg.BOOTSTRAP_ROUNDS} Resamples)")
     ci_results = bootstrap_ci(y_test.values, prim_scores, prim_cut, n_boot=cfg.BOOTSTRAP_ROUNDS, seed=cfg.SEED)
     log("| Metric | Point Estimate | 95% Confidence Interval | Note |")
     log("|---|---|---|---|")
-    c_prim = eval_results[cfg.PRIMARY_VARIANT]["raw"]
     for m in ["f1", "precision", "recall", "roc_auc", "pr_auc"]:
-        log(f"| **{m.upper()}** | {c_prim[m]:.4f} | **{ci_results[m]['ci_str']}** | Wider CI reflects sparse test anomaly count ($N_{{anom}}=44$) |")
+        log(f"| **{m.upper()}** | {c_prim[m]:.4f} | **{ci_results[m]['ci_str']}** | Wider CI reflects sparse test anomaly count ($N_{{anom}}={n_anom_test}$) |")
+    log("")
+
+    # Explicit verdict against each baseline
+    log("### Baseline Outperformance Verdict (Primary Variant)")
+    log("| Baseline | Baseline F1 | Model F1 | Beats on F1? | Baseline ROC-AUC | Model ROC-AUC | Beats on ROC-AUC? | Baseline F1 outside model's 95% CI? |")
+    log("|---|---|---|---|---|---|---|---|")
+    f1_lo, f1_hi = ci_results["f1"]["low_95"], ci_results["f1"]["high_95"]
+    beats_all_f1, beats_all_auc = True, True
+    for bdata in baselines.values():
+        beat_f1, beat_auc = c_prim["f1"] > bdata["f1"], c_prim["roc_auc"] > bdata["roc_auc"]
+        beats_all_f1 &= beat_f1
+        beats_all_auc &= beat_auc
+        outside = not (f1_lo <= bdata["f1"] <= f1_hi)
+        log(f"| {bdata['description']} | {bdata['f1']:.4f} | {c_prim['f1']:.4f} | {'Yes' if beat_f1 else 'No'} | "
+            f"{bdata['roc_auc']:.4f} | {c_prim['roc_auc']:.4f} | {'Yes' if beat_auc else 'No'} | {'Yes' if outside else 'No'} |")
+    log("")
+    log(f"- **Outperforms all three baselines on F1:** {'Yes' if beats_all_f1 else 'No'}. "
+        f"**On ROC-AUC:** {'Yes' if beats_all_auc else 'No'}. A baseline F1 inside the model's 95% CI "
+        f"[{f1_lo:.4f}, {f1_hi:.4f}] means the difference is not statistically distinguishable on this test set.")
     log("")
 
     # Quarterly Drift
@@ -317,7 +379,9 @@ def main():
         all_variants_data, cfg.OUTPUT_DIR
     )
     log(f"- Enriched dataset created: `{enriched_df.shape[0]} rows` $\\times$ `{enriched_df.shape[1]} columns`.")
-    log(f"- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary risk probability), `Anomaly_Score_raw` (primary alarm score, alarm if ≥ {cfg.DECISION_CUTOFF:.2f}), and cross-variant columns.")
+    log(f"- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary risk probability), `Anomaly_Score_raw`, and cross-variant columns. "
+        f"Primary alarm rule: `{'Anomaly_Score' if all_variants_data[cfg.PRIMARY_VARIANT]['score_type'] == 'calibrated' else 'Anomaly_Score_raw'}` "
+        f"≥ {all_variants_data[cfg.PRIMARY_VARIANT]['cutoff']:.2f}.")
     log("- **In-Sample Score Removal:** Optimistic in-sample training scores strictly eliminated; training rows contain out-of-fold calibrated probabilities.")
     log("")
 
@@ -326,7 +390,7 @@ def main():
     audit_results = run_full_verification_suite(
         X_train, y_train, X_test, y_test, train_df, test_df,
         global_fences, group_fences, feat_data["full_feat_df"],
-        cat_indices, all_variants_data[cfg.PRIMARY_VARIANT]
+        cat_indices, all_variants_data[cfg.PRIMARY_VARIANT], label_method=label_method
     )
     log("| Diagnostic Check | Status | Verification Evidence |")
     log("|---|---|---|")
@@ -339,7 +403,7 @@ def main():
     log("### 1. Leakage Safeguards in History-Only Mode")
     log("In this framework, target leakage is eliminated by design:")
     log("- Features are constructed using strictly past runs (lag-1 and shifted rolling-5).")
-    log("- The first run of each machine+model group (17 shifts) is dropped because no prior operational history exists.")
+    log(f"- The first run of each machine+model group ({feat_data['n_drop_train'] + feat_data['n_drop_test']} shifts) is dropped because no prior operational history exists.")
     log("- No same-row parameters (Operating time, Downtime, Production, Defects, A, P, Q, OEE) are accessible to the ML model.")
     log("- Fences and calibrator are learned strictly on the training period and walk-forward OOF splits.")
     log("")
@@ -347,13 +411,13 @@ def main():
     log("- **Why is test F1 lower than same_row mode?** In `same_row` mode, the model was recovering an exact mathematical formula (an algebraic tautology), yielding an artificial F1 > 0.70. "
         "In `history_only` mode, the model is performing genuine predictive forecasting of industrial degradation from historical telemetry alone.")
     best_base_name, best_base = max(baselines.items(), key=lambda kv: kv[1]["f1"])
-    log(f"- **Comparison with Baselines:** At the fixed cutoff {c_prim['cutoff']:.2f}, the primary model ({cfg.PRIMARY_VARIANT.upper()} raw) achieves "
+    log(f"- **Comparison with Baselines:** The primary model ({cfg.PRIMARY_VARIANT.upper()}, {c_prim['description']}) achieves "
         f"**F1 = {c_prim['f1']:.4f}**, **Recall = {c_prim['recall']:.2%}**, **Precision = {c_prim['precision']:.2%}** ({c_prim['alarms_count']} alarms) "
         f"and **PR-AUC = {c_prim['pr_auc']:.4f}** vs. test prevalence {c_prim['prevalence']:.4f}. "
         f"The strongest fixed-rule baseline ({best_base['description']}) reaches F1 = {best_base['f1']:.4f}.")
     pmr_best = {r_lbl: max(variants_list, key=lambda v: eval_results[v]["precision_at_matched_recall"][r_key])
                 for r_key, r_lbl in [("prec_at_recall_50", "50%"), ("prec_at_recall_60", "60%"), ("prec_at_recall_70", "70%")]}
-    log("- **Ranking vs. Threshold:** Precision at matched recall (raw scores) isolates ranking quality from the cutoff choice; "
+    log("- **Ranking vs. Threshold:** Precision at matched recall (alarm scores) isolates ranking quality from the cutoff choice; "
         "highest precision by recall level: " + ", ".join(f"{lvl} → {v.upper()}" for lvl, v in pmr_best.items()) + ".")
     log("")
 

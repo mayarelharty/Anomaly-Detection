@@ -28,13 +28,14 @@ from sklearn.inspection import permutation_importance
 import config as cfg
 
 
-def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np.ndarray,
-                            cal_scores: np.ndarray, cutoff: float = None):
+def evaluate_single_variant(variant_name: str, y_test: pd.Series, vd: dict):
     """
-    Compute comprehensive metrics for both raw and calibrated versions of a variant
-    at the fixed decision cutoff (raw scores are the primary alarm signal).
+    Compute comprehensive metrics for a trained variant `vd` (output of train_and_calibrate_variant):
+    raw and calibrated scores at 0.50, and the alarm scores at the selected (F1) and F2 cutoffs.
     """
-    cutoff = cfg.DECISION_CUTOFF if cutoff is None else cutoff
+    raw_scores, cal_scores, alarm_scores = vd["test_raw_scores"], vd["test_cal_scores"], vd["test_alarm_scores"]
+    how = "OOF-F1 cutoff" if cfg.CUTOFF_MODE == "oof_f1" else "fixed cutoff"
+    stype = vd["score_type"].title()
     y_true = y_test.values
     prevalence = float(np.mean(y_true))
     total_anomalies = int(np.sum(y_true))
@@ -43,8 +44,10 @@ def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np
 
     # Configurations to evaluate:
     configs = [
-        ("raw", raw_scores, cutoff, f"Raw @ Cutoff {cutoff:.2f} (Primary)"),
-        ("calibrated", cal_scores, cutoff, f"Calibrated @ Cutoff {cutoff:.2f}"),
+        ("raw_50", raw_scores, 0.50, "Raw @ Cutoff 0.50"),
+        ("cal_50", cal_scores, 0.50, "Calibrated @ Cutoff 0.50"),
+        ("primary", alarm_scores, vd["cutoff"], f"{stype} @ {how} {vd['cutoff']:.2f}"),
+        ("primary_f2", alarm_scores, vd["cutoff_f2"], f"{stype} @ OOF-F2 cutoff {vd['cutoff_f2']:.2f}"),
     ]
 
     for cfg_key, scores, cut, desc in configs:
@@ -81,7 +84,7 @@ def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np
         }
 
     # Precision at matched recall values
-    prec_at_rec = precision_at_matched_recall(y_true, raw_scores, target_recalls=[0.50, 0.60, 0.70])
+    prec_at_rec = precision_at_matched_recall(y_true, alarm_scores, target_recalls=[0.50, 0.60, 0.70])
     results["precision_at_matched_recall"] = prec_at_rec
 
     return results
@@ -261,9 +264,9 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     # 1. ROC Curves
     fig, ax = plt.subplots(figsize=(7, 6))
     for vname, data in all_variants_data.items():
-        fpr, tpr, _ = roc_curve(y_true, data["test_raw_scores"])
-        auc = roc_auc_score(y_true, data["test_raw_scores"])
-        ax.plot(fpr, tpr, label=f"{vname.upper()} Raw (AUC = {auc:.3f})", lw=2)
+        fpr, tpr, _ = roc_curve(y_true, data["test_alarm_scores"])
+        auc = roc_auc_score(y_true, data["test_alarm_scores"])
+        ax.plot(fpr, tpr, label=f"{vname.upper()} {data['score_type'].title()} (AUC = {auc:.3f})", lw=2)
     # Add persistence baseline
     persist_scores = X_test["lag1_y_anom"].fillna(0).values
     fpr_p, tpr_p, _ = roc_curve(y_true, persist_scores)
@@ -281,8 +284,8 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     # 2. PR Curves
     fig, ax = plt.subplots(figsize=(7, 6))
     for vname, data in all_variants_data.items():
-        prec, rec, _ = precision_recall_curve(y_true, data["test_raw_scores"])
-        ap = average_precision_score(y_true, data["test_raw_scores"])
+        prec, rec, _ = precision_recall_curve(y_true, data["test_alarm_scores"])
+        ap = average_precision_score(y_true, data["test_alarm_scores"])
         ax.plot(rec, prec, label=f"{vname.upper()} (PR-AUC = {ap:.3f})", lw=2)
     ax.axhline(np.mean(y_true), color='grey', linestyle=':', label=f"Test Prevalence ({np.mean(y_true):.3f})")
     ax.set_title("Test Period Precision-Recall Curves", fontweight="bold")
@@ -311,17 +314,17 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     plt.savefig(os.path.join(output_dir, "calibration_curve.png"), dpi=200)
     plt.close()
 
-    # 4. Confusion Matrix (Primary Variant: Raw Scores @ Fixed Decision Cutoff)
+    # 4. Confusion Matrix (Primary Variant: Alarm Scores @ Selected Cutoff)
     prim_data = all_variants_data[cfg.PRIMARY_VARIANT]
     cutoff = prim_data["cutoff"]
-    prim_pred = (prim_data["test_raw_scores"] >= cutoff).astype(int)
+    prim_pred = (prim_data["test_alarm_scores"] >= cutoff).astype(int)
     cm = confusion_matrix(y_true, prim_pred)
 
     fig, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
                 xticklabels=["Normal (0)", "Anomaly (1)"],
                 yticklabels=["Normal (0)", "Anomaly (1)"])
-    ax.set_title(f"Confusion Matrix: {cfg.PRIMARY_VARIANT.upper()} (Raw, Cutoff = {cutoff:.2f})", fontweight="bold", fontsize=10)
+    ax.set_title(f"Confusion Matrix: {cfg.PRIMARY_VARIANT.upper()} ({prim_data['score_type'].title()}, Cutoff = {cutoff:.2f})", fontweight="bold", fontsize=10)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual Ground Truth")
     plt.tight_layout()

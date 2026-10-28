@@ -27,7 +27,7 @@ def run_full_verification_suite(X_train: pd.DataFrame, y_train: pd.Series,
                                 train_df: pd.DataFrame, test_df: pd.DataFrame,
                                 global_fences: dict, group_fences: dict,
                                 df_feat_full: pd.DataFrame, cat_indices: list,
-                                primary_model_data: dict) -> dict:
+                                primary_model_data: dict, label_method: str = None) -> dict:
     """
     Execute all 7 verification checks and return audit report dictionary.
     """
@@ -47,7 +47,7 @@ def run_full_verification_suite(X_train: pd.DataFrame, y_train: pd.Series,
     print(f"Check 2 [Lag Strictness]: {'PASS ✓' if c2_passed else 'FAIL ✗'} – {c2_msg}")
 
     # Check 3: Fences learned from train only
-    c3_passed, c3_msg = _check_fences_train_only(train_df, test_df, global_fences, group_fences)
+    c3_passed, c3_msg = _check_fences_train_only(train_df, test_df, global_fences, group_fences, label_method)
     audit["3_fences_train_only"] = {"status": "PASS" if c3_passed else "FAIL", "evidence": c3_msg}
     print(f"Check 3 [Fences Train-Only]: {'PASS ✓' if c3_passed else 'FAIL ✗'} – {c3_msg}")
 
@@ -98,9 +98,9 @@ def _check_lag_strictness(df_feat_full):
     return False, f"Found {violations} lag-leakage mismatches out of {checked} transitions."
 
 
-def _check_fences_train_only(train_df, test_df, global_fences, group_fences):
+def _check_fences_train_only(train_df, test_df, global_fences, group_fences, label_method=None):
     # Recompute on train
-    gf_check, grpf_check, _ = compute_fences(train_df, k=cfg.IQR_K, scope=cfg.IQR_SCOPE)
+    gf_check, grpf_check, _ = compute_fences(train_df, k=cfg.IQR_K, scope=cfg.IQR_SCOPE, method=label_method)
     diffs = [abs(global_fences[d] - gf_check[d]) for d in global_fences]
     if max(diffs) < 1e-12:
         return True, "Fences identically reproduced from train period; 0 dependence on test rows."

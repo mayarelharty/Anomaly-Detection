@@ -62,7 +62,8 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     1. Run GridSearchCV with walk-forward TimeSeriesSplit(5)
     2. Collect walk-forward Out-Of-Fold (OOF) predictions
     3. Fit IsotonicRegression calibrator on non-NaN OOF predictions
-    4. Score OOF F1/F2 of raw predictions at the fixed decision cutoff (cfg.DECISION_CUTOFF)
+    4. Decision cutoff: CUTOFF_MODE "oof_f1" sweeps calibrated OOF predictions for the F1-optimal
+       cutoff (F2-optimal recorded); "fixed_raw" scores raw OOF predictions at cfg.DECISION_CUTOFF
     5. Score untouched test set with both raw and calibrated model
     """
     t0 = time.time()
@@ -106,10 +107,16 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     oof_calibrated = np.full(len(X_train), np.nan)
     oof_calibrated[valid_oof_mask] = calibrator.predict(oof_valid_scores)
 
-    # 4. Evaluate the fixed decision cutoff on raw OOF predictions
-    oof_pred = (oof_valid_scores >= cfg.DECISION_CUTOFF).astype(int)
-    oof_f1 = float(f1_score(y_oof_valid, oof_pred, zero_division=0))
-    oof_f2 = float(fbeta_score(y_oof_valid, oof_pred, beta=2, zero_division=0))
+    # 4. Decision cutoff on OOF predictions
+    if cfg.CUTOFF_MODE == "oof_f1":
+        score_type, oof_alarm_scores = "calibrated", oof_calibrated[valid_oof_mask]
+        cutoffs = np.linspace(0.01, 0.99, 99)
+    else:
+        score_type, oof_alarm_scores = "raw", oof_valid_scores
+        cutoffs = np.array([cfg.DECISION_CUTOFF])
+    f1s = [f1_score(y_oof_valid, (oof_alarm_scores >= c).astype(int), zero_division=0) for c in cutoffs]
+    f2s = [fbeta_score(y_oof_valid, (oof_alarm_scores >= c).astype(int), beta=2, zero_division=0) for c in cutoffs]
+    i_f1, i_f2 = int(np.argmax(f1s)), int(np.argmax(f2s))
 
     oof_auc = float(roc_auc_score(y_oof_valid, oof_valid_scores)) if len(np.unique(y_oof_valid)) > 1 else float("nan")
 
@@ -129,9 +136,12 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
         "oof_calibrated": oof_calibrated,
         "warm_up_nans": warm_up_nans,
         "oof_auc": oof_auc,
-        "cutoff": cfg.DECISION_CUTOFF,
-        "oof_f1": oof_f1,
-        "oof_f2": oof_f2,
+        "score_type": score_type,
+        "cutoff": float(cutoffs[i_f1]),
+        "oof_f1": float(f1s[i_f1]),
+        "cutoff_f2": float(cutoffs[i_f2]),
+        "oof_f2": float(f2s[i_f2]),
         "test_raw_scores": test_raw_scores,
         "test_cal_scores": test_cal_scores,
+        "test_alarm_scores": test_cal_scores if score_type == "calibrated" else test_raw_scores,
     }

@@ -17,11 +17,29 @@ import config as cfg
 
 DIMS = ["Availability (A)", "Performance (P)", "Quality (Q)"]
 DIM_SHORT = {"Availability (A)": "A", "Performance (P)": "P", "Quality (Q)": "Q"}
+FENCE_COLS = DIMS + ["OEE"]
+
+METHOD_RULES = {
+    "iqr":        "Box plot: $D < Q_1 - K \\times \\text{IQR}$ on any of A, P, Q",
+    "percentile": f"Alt A: $D < P_{{{int(cfg.FALLBACK_PERCENTILE * 100)}}}$ on any of A, P, Q",
+    "oee":        "Alt B: $\\text{OEE} < Q_1 - K \\times \\text{IQR}$ (single composite fence)",
+    "benchmark":  "Alt C: $A < 0.90 \\lor P < 0.95 \\lor Q < 0.999$ (static industry targets)",
+}
 
 
-def compute_fences(train_df: pd.DataFrame, k: float = None, scope: str = None, min_group_train: int = None):
+def _lower_fence(s: pd.Series, k: float, method: str) -> float:
+    """Training-only lower fence of one series; Alt A uses a percentile, everything else Tukey IQR."""
+    if method == "percentile":
+        return float(s.quantile(cfg.FALLBACK_PERCENTILE))
+    q1, q3 = s.quantile(0.25), s.quantile(0.75)
+    return float(q1 - k * (q3 - q1))
+
+
+def compute_fences(train_df: pd.DataFrame, k: float = None, scope: str = None, min_group_train: int = None,
+                   method: str = None):
     """
-    Compute lower fences for A, P, Q strictly from training rows.
+    Compute lower fences for A, P, Q and OEE strictly from training rows.
+    method: "iqr" | "percentile" (Alt A) | "oee" (Alt B, IQR fences, label on OEE) | "benchmark" (Alt C, static, global)
     Returns:
         global_fences: dict of {dim: lower_fence}
         group_fences: dict of {(machine, model): {dim: lower_fence}}
@@ -30,38 +48,35 @@ def compute_fences(train_df: pd.DataFrame, k: float = None, scope: str = None, m
     k = cfg.IQR_K if k is None else k
     scope = cfg.IQR_SCOPE if scope is None else scope
     min_group_train = cfg.MIN_GROUP_TRAIN if min_group_train is None else min_group_train
+    method = cfg.THRESHOLD_METHOD if method is None else method
 
-    global_fences = {}
-    for d in DIMS:
-        q1 = train_df[d].quantile(0.25)
-        q3 = train_df[d].quantile(0.75)
-        iqr = q3 - q1
-        global_fences[d] = q1 - k * iqr
+    group_counts = {key: len(grp) for key, grp in train_df.groupby(["machine", "Model"])}
+
+    if method == "benchmark":
+        global_fences = dict(cfg.BENCHMARK_TARGETS)
+        global_fences["OEE"] = float(np.prod(list(cfg.BENCHMARK_TARGETS.values())))
+        return global_fences, {}, group_counts
+
+    global_fences = {d: _lower_fence(train_df[d], k, method) for d in FENCE_COLS}
 
     group_fences = {}
-    group_counts = {}
     if scope == "machine_model":
         for (m, mod), grp in train_df.groupby(["machine", "Model"]):
-            n = len(grp)
-            group_counts[(m, mod)] = n
-            if n >= min_group_train:
-                gf = {}
-                for d in DIMS:
-                    q1 = grp[d].quantile(0.25)
-                    q3 = grp[d].quantile(0.75)
-                    iqr = q3 - q1
-                    gf[d] = q1 - k * iqr
-                group_fences[(m, mod)] = gf
+            if len(grp) >= min_group_train:
+                group_fences[(m, mod)] = {d: _lower_fence(grp[d], k, method) for d in FENCE_COLS}
 
     return global_fences, group_fences, group_counts
 
 
-def apply_fences(df: pd.DataFrame, global_fences: dict, group_fences: dict, scope: str = None) -> pd.DataFrame:
+def apply_fences(df: pd.DataFrame, global_fences: dict, group_fences: dict, scope: str = None,
+                 method: str = None) -> pd.DataFrame:
     """
     Apply pre-computed training fences to a dataset (train or test).
+    y_anom is the OR of the dimension flags, except Alt B ("oee") where it is OEE < OEE fence.
     Returns DataFrame with columns ['anom_A', 'anom_P', 'anom_Q', 'y_anom'].
     """
     scope = cfg.IQR_SCOPE if scope is None else scope
+    method = cfg.THRESHOLD_METHOD if method is None else method
     anom_A = []
     anom_P = []
     anom_Q = []
@@ -81,7 +96,10 @@ def apply_fences(df: pd.DataFrame, global_fences: dict, group_fences: dict, scop
         anom_A.append(is_a)
         anom_P.append(is_p)
         anom_Q.append(is_q)
-        y_anom.append(int(is_a or is_p or is_q))
+        if method == "oee":
+            y_anom.append(int(row["OEE"] < f["OEE"]))
+        else:
+            y_anom.append(int(is_a or is_p or is_q))
 
     out = pd.DataFrame({
         "anom_A": anom_A,
@@ -92,25 +110,47 @@ def apply_fences(df: pd.DataFrame, global_fences: dict, group_fences: dict, scop
     return out
 
 
-def gate_check(train_labels: pd.DataFrame, test_labels: pd.DataFrame) -> bool:
+def _gate_passes(train_labels: pd.DataFrame, test_labels: pd.DataFrame) -> bool:
+    n_tr, n_te = int(train_labels["y_anom"].sum()), int(test_labels["y_anom"].sum())
+    return (min(n_tr, len(train_labels) - n_tr) >= cfg.MIN_MINORITY_TRAIN
+            and min(n_te, len(test_labels) - n_te) >= cfg.MIN_MINORITY_TEST)
+
+
+def gate_check(train_labels: pd.DataFrame, test_labels: pd.DataFrame, alternatives: pd.DataFrame = None):
     """
     Verify label gate criteria:
-    - >= 50 training anomalies
-    - >= 10 test anomalies
+    - >= MIN_MINORITY_TRAIN training rows in the minority class
+    - >= MIN_MINORITY_TEST test rows in each class
     - Warn if any single dimension has < 10 training positives
+    On failure, recommends the threshold alternatives (from `alternatives`) that would pass.
+    Returns (passed, messages).
     """
-    n_train_anom = train_labels["y_anom"].sum()
-    n_test_anom = test_labels["y_anom"].sum()
+    n_train_anom = int(train_labels["y_anom"].sum())
+    n_test_anom = int(test_labels["y_anom"].sum())
+    n_train_norm = len(train_labels) - n_train_anom
+    n_test_norm = len(test_labels) - n_test_anom
 
     passed = True
     msgs = []
 
-    if n_train_anom < cfg.MIN_MINORITY_TRAIN:
-        msgs.append(f"GATE FAIL: Train anomalies = {n_train_anom} (requires >= {cfg.MIN_MINORITY_TRAIN})")
+    if min(n_train_anom, n_train_norm) < cfg.MIN_MINORITY_TRAIN:
+        msgs.append(f"GATE FAIL: Train minority class = {min(n_train_anom, n_train_norm)} "
+                    f"(anomalies {n_train_anom}, normal {n_train_norm}; requires >= {cfg.MIN_MINORITY_TRAIN})")
         passed = False
-    if n_test_anom < cfg.MIN_MINORITY_TEST:
-        msgs.append(f"GATE FAIL: Test anomalies = {n_test_anom} (requires >= {cfg.MIN_MINORITY_TEST})")
+    if min(n_test_anom, n_test_norm) < cfg.MIN_MINORITY_TEST:
+        msgs.append(f"GATE FAIL: Test anomalies = {n_test_anom}, normal = {n_test_norm} "
+                    f"(requires >= {cfg.MIN_MINORITY_TEST} of each class)")
         passed = False
+    if not passed and alternatives is not None:
+        ok = alternatives[alternatives["Gate"] == "PASS"]
+        if n_train_anom < cfg.MIN_MINORITY_TRAIN and (ok["Method"] == "percentile").any():
+            msgs.append("RECOMMENDATION: too few anomalies; use Alternative A (`THRESHOLD_METHOD = 'percentile'`).")
+        elif len(ok):
+            msgs.append("RECOMMENDATION: switch `THRESHOLD_METHOD` to one of the passing alternatives: "
+                        + ", ".join(f"'{m}' ({a})" for m, a in zip(ok["Method"], ok["Alternative"])) + ".")
+        else:
+            msgs.append("RECOMMENDATION: no documented alternative passes the gate; extend the data window "
+                        "or lower MIN_MINORITY_TRAIN / MIN_MINORITY_TEST.")
 
     # Check per-dimension warnings
     for d, short in [("anom_A", "A"), ("anom_P", "P"), ("anom_Q", "Q")]:
@@ -124,28 +164,81 @@ def gate_check(train_labels: pd.DataFrame, test_labels: pd.DataFrame) -> bool:
         for m in msgs:
             print(f"  • {m}")
         print("!" * 60)
-        return False
+        return False, msgs
 
     print(f"[gate] PASSED ✓ Train anomalies = {n_train_anom}, Test anomalies = {n_test_anom}")
-    return True
+    return True, msgs
+
+
+def resolve_labels(train_df: pd.DataFrame, test_df: pd.DataFrame):
+    """
+    Label train/test with cfg.THRESHOLD_METHOD. If the IQR fences give fewer than
+    MIN_MINORITY_TRAIN training anomalies and AUTO_FALLBACK_PERCENTILE is on, fall back to
+    Alternative A (percentile fences). Returns (method, global_fences, group_fences, train_labels,
+    test_labels, note).
+    """
+    method, note = cfg.THRESHOLD_METHOD, None
+    gf, grpf, _ = compute_fences(train_df, method=method)
+    tr = apply_fences(train_df, gf, grpf, method=method)
+    te = apply_fences(test_df, gf, grpf, method=method)
+    if method == "iqr" and cfg.AUTO_FALLBACK_PERCENTILE and tr["y_anom"].sum() < cfg.MIN_MINORITY_TRAIN:
+        note = (f"IQR fences produced {int(tr['y_anom'].sum())} training anomalies (< {cfg.MIN_MINORITY_TRAIN}); "
+                f"fell back to Alternative A (P{int(cfg.FALLBACK_PERCENTILE * 100)} percentile fences).")
+        method = "percentile"
+        gf, grpf, _ = compute_fences(train_df, method=method)
+        tr = apply_fences(train_df, gf, grpf, method=method)
+        te = apply_fences(test_df, gf, grpf, method=method)
+    return method, gf, grpf, tr, te, note
+
+
+def run_alternatives_table(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
+    """Label counts and gate status for the box-plot rule and the three documented alternatives."""
+    rows = []
+    for method, name in [("iqr", "Box plot (default)"), ("percentile", "Alternative A"),
+                         ("oee", "Alternative B"), ("benchmark", "Alternative C")]:
+        gf, grpf, _ = compute_fences(train_df, method=method)
+        tr = apply_fences(train_df, gf, grpf, method=method)
+        te = apply_fences(test_df, gf, grpf, method=method)
+        tr_anom, te_anom = int(tr["y_anom"].sum()), int(te["y_anom"].sum())
+        rows.append({
+            "Alternative": name,
+            "Method": method,
+            "Rule": METHOD_RULES[method],
+            "Train Anomalies": tr_anom,
+            "Train Rate": f"{tr_anom/len(train_df):.2%}",
+            "Test Anomalies": te_anom,
+            "Test Rate": f"{te_anom/len(test_df):.2%}",
+            "Gate": "PASS" if _gate_passes(tr, te) else "FAIL",
+        })
+    return pd.DataFrame(rows)
 
 
 def label_distribution_report(df: pd.DataFrame, train_labels: pd.DataFrame, test_labels: pd.DataFrame,
-                              train_idx, test_idx, global_fences: dict, group_fences: dict):
+                              train_idx, test_idx, global_fences: dict, group_fences: dict, method: str = None):
     """
     Generate comprehensive label distribution summary, overlap patterns, and quarterly drift.
     """
+    method = cfg.THRESHOLD_METHOD if method is None else method
+    fence_desc = {
+        "iqr":        f"$Q_1 - {cfg.IQR_K} \\times \\text{{IQR}}$ on Train",
+        "oee":        f"$Q_1 - {cfg.IQR_K} \\times \\text{{IQR}}$ on Train",
+        "percentile": f"$P_{{{int(cfg.FALLBACK_PERCENTILE * 100)}}}$ on Train",
+        "benchmark":  "Static industry target",
+    }[method]
+    label_dims = ["OEE"] if method == "oee" else DIMS
     lines = []
-    lines.append("## Label Distribution (Box-Plot IQR Rule)")
-    lines.append(f"- Configuration: `IQR_K = {cfg.IQR_K}`, `IQR_SCOPE = '{cfg.IQR_SCOPE}'`, `MIN_GROUP_TRAIN = {cfg.MIN_GROUP_TRAIN}`")
+    lines.append("## Label Distribution (Box-Plot IQR Rule)" if method == "iqr"
+                 else f"## Label Distribution ({METHOD_RULES[method].split(':')[0]})")
+    lines.append(f"- Labelling rule: {METHOD_RULES[method]}.")
+    lines.append(f"- Configuration: `THRESHOLD_METHOD = '{method}'`, `IQR_K = {cfg.IQR_K}`, `IQR_SCOPE = '{cfg.IQR_SCOPE}'`, `MIN_GROUP_TRAIN = {cfg.MIN_GROUP_TRAIN}`")
     lines.append("")
 
     # Global fences
     lines.append("### Global Training Fences")
-    lines.append("| Dimension | Lower Fence | Description |")
-    lines.append("|---|---|---|")
-    for d in DIMS:
-        lines.append(f"| {d} | **{global_fences[d]:.4f}** | $Q_1 - {cfg.IQR_K} \\times \\text{{IQR}}$ on Train |")
+    lines.append("| Dimension | Lower Fence | Description | Used for $y_{\\text{anom}}$ |")
+    lines.append("|---|---|---|---|")
+    for d in FENCE_COLS:
+        lines.append(f"| {d} | **{global_fences[d]:.4f}** | {fence_desc} | {'Yes' if d in label_dims else 'No'} |")
     lines.append("")
 
     # Group fences
@@ -221,9 +314,9 @@ def run_sensitivity_table(train_df: pd.DataFrame, test_df: pd.DataFrame):
     rows = []
     for scope in ["global", "machine_model"]:
         for k in [1.5, 2.0, 3.0]:
-            gf, grp_f, _ = compute_fences(train_df, k=k, scope=scope)
-            tr_lbl = apply_fences(train_df, gf, grp_f, scope=scope)
-            te_lbl = apply_fences(test_df, gf, grp_f, scope=scope)
+            gf, grp_f, _ = compute_fences(train_df, k=k, scope=scope, method="iqr")
+            tr_lbl = apply_fences(train_df, gf, grp_f, scope=scope, method="iqr")
+            te_lbl = apply_fences(test_df, gf, grp_f, scope=scope, method="iqr")
 
             tr_anom = tr_lbl["y_anom"].sum()
             te_anom = te_lbl["y_anom"].sum()
@@ -248,11 +341,12 @@ def run_sensitivity_table(train_df: pd.DataFrame, test_df: pd.DataFrame):
 
 def plot_boxplot_with_fences(train_df: pd.DataFrame, global_fences: dict, output_dir: str):
     """
-    Extended box plot visualization showing distributions, outliers, and training lower fences.
+    Extended box plot visualization showing distributions, outliers, and training lower fences
+    for A, P, Q and OEE.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    cols = ["Availability (A)", "Performance (P)", "Quality (Q)"]
-    palette = ["#4A90E2", "#50E3C2", "#F5A623"]
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    cols = FENCE_COLS
+    palette = ["#4A90E2", "#50E3C2", "#F5A623", "#9B59B6"]
 
     for ax, col, color in zip(axes, cols, palette):
         sns.boxplot(y=train_df[col], ax=ax, color=color, flierprops={'marker':'o', 'markerfacecolor':'crimson', 'markersize':4, 'alpha':0.6})
