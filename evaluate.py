@@ -29,10 +29,12 @@ import config as cfg
 
 
 def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np.ndarray,
-                            cal_scores: np.ndarray, cutoff_f1: float, cutoff_f2: float = 0.5):
+                            cal_scores: np.ndarray, cutoff: float = None):
     """
-    Compute comprehensive metrics for both raw and calibrated versions of a variant.
+    Compute comprehensive metrics for both raw and calibrated versions of a variant
+    at the fixed decision cutoff (raw scores are the primary alarm signal).
     """
+    cutoff = cfg.DECISION_CUTOFF if cutoff is None else cutoff
     y_true = y_test.values
     prevalence = float(np.mean(y_true))
     total_anomalies = int(np.sum(y_true))
@@ -41,10 +43,8 @@ def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np
 
     # Configurations to evaluate:
     configs = [
-        ("raw_50", raw_scores, 0.50, "Raw @ Cutoff 0.50"),
-        ("cal_50", cal_scores, 0.50, "Calibrated @ Cutoff 0.50"),
-        ("cal_opt_f1", cal_scores, cutoff_f1, f"Calibrated @ Fixed Cutoff {cutoff_f1:.2f}"),
-        ("cal_opt_f2", cal_scores, cutoff_f2, f"Calibrated @ Fixed Cutoff {cutoff_f2:.2f}"),
+        ("raw", raw_scores, cutoff, f"Raw @ Cutoff {cutoff:.2f} (Primary)"),
+        ("calibrated", cal_scores, cutoff, f"Calibrated @ Cutoff {cutoff:.2f}"),
     ]
 
     for cfg_key, scores, cut, desc in configs:
@@ -81,7 +81,7 @@ def evaluate_single_variant(variant_name: str, y_test: pd.Series, raw_scores: np
         }
 
     # Precision at matched recall values
-    prec_at_rec = precision_at_matched_recall(y_true, cal_scores, target_recalls=[0.50, 0.60, 0.70])
+    prec_at_rec = precision_at_matched_recall(y_true, raw_scores, target_recalls=[0.50, 0.60, 0.70])
     results["precision_at_matched_recall"] = prec_at_rec
 
     return results
@@ -188,21 +188,21 @@ def bootstrap_ci(y_true: np.ndarray, scores: np.ndarray, cutoff: float, n_boot: 
 
 
 def quarterly_drift_analysis(df_feat_full: pd.DataFrame, valid_test_idx: list, y_test: pd.Series,
-                             cal_scores: np.ndarray, cutoff: float):
+                             scores: np.ndarray, cutoff: float):
     """
     Compute metrics by calendar quarter to show temporal drift.
     """
     test_df = df_feat_full.loc[valid_test_idx].copy()
     test_df["Quarter"] = test_df["Date"].dt.to_period("Q").astype(str)
     test_df["y_true"] = y_test.values
-    test_df["cal_score"] = cal_scores
-    test_df["y_pred"] = (cal_scores >= cutoff).astype(int)
+    test_df["score"] = scores
+    test_df["y_pred"] = (scores >= cutoff).astype(int)
 
     q_metrics = {}
     for qtr, grp in test_df.groupby("Quarter"):
         yt = grp["y_true"].values
         yp = grp["y_pred"].values
-        sc = grp["cal_score"].values
+        sc = grp["score"].values
         cnt = len(grp)
         anom = int(np.sum(yt))
         rate = float(np.mean(yt))
@@ -261,9 +261,9 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     # 1. ROC Curves
     fig, ax = plt.subplots(figsize=(7, 6))
     for vname, data in all_variants_data.items():
-        fpr, tpr, _ = roc_curve(y_true, data["test_cal_scores"])
-        auc = roc_auc_score(y_true, data["test_cal_scores"])
-        ax.plot(fpr, tpr, label=f"{vname.upper()} Calibrated (AUC = {auc:.3f})", lw=2)
+        fpr, tpr, _ = roc_curve(y_true, data["test_raw_scores"])
+        auc = roc_auc_score(y_true, data["test_raw_scores"])
+        ax.plot(fpr, tpr, label=f"{vname.upper()} Raw (AUC = {auc:.3f})", lw=2)
     # Add persistence baseline
     persist_scores = X_test["lag1_y_anom"].fillna(0).values
     fpr_p, tpr_p, _ = roc_curve(y_true, persist_scores)
@@ -281,8 +281,8 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     # 2. PR Curves
     fig, ax = plt.subplots(figsize=(7, 6))
     for vname, data in all_variants_data.items():
-        prec, rec, _ = precision_recall_curve(y_true, data["test_cal_scores"])
-        ap = average_precision_score(y_true, data["test_cal_scores"])
+        prec, rec, _ = precision_recall_curve(y_true, data["test_raw_scores"])
+        ap = average_precision_score(y_true, data["test_raw_scores"])
         ax.plot(rec, prec, label=f"{vname.upper()} (PR-AUC = {ap:.3f})", lw=2)
     ax.axhline(np.mean(y_true), color='grey', linestyle=':', label=f"Test Prevalence ({np.mean(y_true):.3f})")
     ax.set_title("Test Period Precision-Recall Curves", fontweight="bold")
@@ -311,17 +311,17 @@ def plot_all_figures(all_variants_data: dict, baselines: dict, feature_cols: lis
     plt.savefig(os.path.join(output_dir, "calibration_curve.png"), dpi=200)
     plt.close()
 
-    # 4. Confusion Matrix (Primary Variant: SMOTEENN Calibrated @ Fixed 0.50 Cutoff)
+    # 4. Confusion Matrix (Primary Variant: Raw Scores @ Fixed Decision Cutoff)
     prim_data = all_variants_data[cfg.PRIMARY_VARIANT]
-    cutoff_opt = prim_data["best_cut_f1"]
-    prim_pred = (prim_data["test_cal_scores"] >= cutoff_opt).astype(int)
+    cutoff = prim_data["cutoff"]
+    prim_pred = (prim_data["test_raw_scores"] >= cutoff).astype(int)
     cm = confusion_matrix(y_true, prim_pred)
 
     fig, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
                 xticklabels=["Normal (0)", "Anomaly (1)"],
                 yticklabels=["Normal (0)", "Anomaly (1)"])
-    ax.set_title(f"Confusion Matrix: {cfg.PRIMARY_VARIANT.upper()} (Cutoff = {cutoff_opt:.2f})", fontweight="bold")
+    ax.set_title(f"Confusion Matrix: {cfg.PRIMARY_VARIANT.upper()} (Raw, Cutoff = {cutoff:.2f})", fontweight="bold", fontsize=10)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual Ground Truth")
     plt.tight_layout()

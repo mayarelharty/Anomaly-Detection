@@ -119,11 +119,11 @@
   3. **Variant C (`reference`):** Unweighted, unresampled standard Random Forest.
 
 ### Hyperparameter & Calibration Summary Table
-| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Optimal Cutoff (F1) | Optimal Cutoff (F2) | Warm-up NaNs |
-|---|---|---|---|---|---|---|
-| **SMOTEENN** | `depth=None, n_est=100` | 0.1007 | 0.5247 | **0.09** (F1=0.1877) | 0.01 (F2=0.3501) | 220 shifts |
-| **BALANCED** | `depth=10, n_est=100` | 0.1133 | 0.5426 | **0.09** (F1=0.1945) | 0.06 (F2=0.3574) | 220 shifts |
-| **REFERENCE** | `depth=None, n_est=100` | 0.0170 | 0.5580 | **0.09** (F1=0.1978) | 0.05 (F2=0.3612) | 220 shifts |
+| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Decision Cutoff (Raw) | OOF F1 @ Cutoff | OOF F2 @ Cutoff | Warm-up NaNs |
+|---|---|---|---|---|---|---|---|
+| **SMOTEENN** | `depth=None, n_est=100` | 0.1007 | 0.5247 | **0.50** | 0.1419 | 0.1702 | 220 shifts |
+| **BALANCED** | `depth=10, n_est=100` | 0.1133 | 0.5426 | **0.50** | 0.1287 | 0.1243 | 220 shifts |
+| **REFERENCE** | `depth=None, n_est=100` | 0.0170 | 0.5580 | **0.50** | 0.0615 | 0.0443 | 220 shifts |
 
 ## 7. Test Period Performance & Benchmark Comparison
 ### Multi-Variant & Baseline Performance Comparison (Test Set, N = 584)
@@ -132,51 +132,50 @@
 | *Baseline: Always Predict Normal (Majority Class)* | Fixed Rule | 0.0000 | 0.0000 | 0.0000 | 0.5000 | — | 0.0753 | — | 44 |
 | *Baseline: Previous-Run Label Persistence* | Fixed Rule | 0.1707 | 0.1842 | 0.1591 | 0.5508 | — | 0.1164 | — | 44 |
 | *Baseline: Per Machine+Model Training Base Rate* | Fixed Rule | 0.1491 | 0.0810 | 0.9318 | 0.5626 | — | 0.0730 | — | 44 |
-| **SMOTEENN (Raw)** | 0.50 | 0.1443 | 0.1321 | 0.1591 | 0.5758 | 0.1126 | 0.1185 | 53 | 44 |
-| **SMOTEENN (Calibrated @ 0.50)** | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.5733 | 0.0935 | 0.0698 | 0 | 44 |
-| **SMOTEENN (Calibrated - Primary)** | **0.09** | **0.1688** | 0.0978 | **0.6136** | **0.5733** | **0.0935** | **0.0698** | 276 | 44 |
-| **BALANCED (Raw)** | 0.50 | 0.1017 | 0.2000 | 0.0682 | 0.5556 | 0.1275 | 0.1047 | 15 | 44 |
-| **BALANCED (Calibrated @ 0.50)** | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.5648 | 0.0902 | 0.0698 | 0 | 44 |
-| **BALANCED (Calibrated - Primary)** | **0.09** | **0.1659** | 0.1027 | **0.4318** | **0.5648** | **0.0902** | **0.0698** | 185 | 44 |
-| **REFERENCE (Raw)** | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.6224 | 0.1387 | 0.0705 | 0 | 44 |
-| **REFERENCE (Calibrated @ 0.50)** | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.6160 | 0.1088 | 0.0692 | 0 | 44 |
-| **REFERENCE (Calibrated - Primary)** | **0.09** | **0.1370** | 0.1724 | **0.1136** | **0.6160** | **0.1088** | **0.0692** | 29 | 44 |
+| **SMOTEENN (Raw - Primary)** | **0.50** | **0.1443** | 0.1321 | **0.1591** | **0.5758** | **0.1126** | 0.1185 | 53 | 44 |
+| SMOTEENN (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.5733 | 0.0935 | **0.0698** | 0 | 44 |
+| **BALANCED (Raw)** | **0.50** | **0.1017** | 0.2000 | **0.0682** | **0.5556** | **0.1275** | 0.1047 | 15 | 44 |
+| BALANCED (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.5648 | 0.0902 | **0.0698** | 0 | 44 |
+| **REFERENCE (Raw)** | **0.50** | **0.0000** | 0.0000 | **0.0000** | **0.6224** | **0.1387** | 0.0705 | 0 | 44 |
+| REFERENCE (Calibrated) | 0.50 | 0.0000 | 0.0000 | 0.0000 | 0.6160 | 0.1088 | **0.0692** | 0 | 44 |
+
+> **Cutoff note:** Isotonic calibration maps scores to observed anomaly frequencies (max calibrated test score = 0.1429), so a fixed cutoff of 0.50 on calibrated probabilities raises no alarms. Alarms are therefore issued on raw scores; calibrated scores are reported as risk probabilities (Brier score, `Anomaly_Score`).
 
 ### Precision at Matched Recall Levels (Disentangling Ranking vs. Cutoff Tuning)
 | Variant | Precision @ Recall = 50% | Precision @ Recall = 60% | Precision @ Recall = 70% |
 |---|---|---|---|
-| **SMOTEENN** | 0.0978 | 0.0978 | 0.0753 |
-| **BALANCED** | 0.0924 | 0.0777 | 0.0777 |
-| **REFERENCE** | 0.1169 | 0.1169 | 0.0899 |
+| **SMOTEENN** | 0.1057 | 0.0978 | 0.0833 |
+| **BALANCED** | 0.0962 | 0.0818 | 0.0788 |
+| **REFERENCE** | 0.1212 | 0.1169 | 0.0899 |
 
-### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN, 1000 Resamples)
+### Bootstrap 95% Confidence Intervals (Primary Variant: SMOTEENN Raw, cutoff 0.50, 1000 Resamples)
 | Metric | Point Estimate | 95% Confidence Interval | Note |
 |---|---|---|---|
-| **F1** | 0.1688 | **[0.1132, 0.2209]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **PRECISION** | 0.0978 | **[0.0638, 0.1326]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **RECALL** | 0.6136 | **[0.4782, 0.7500]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **ROC_AUC** | 0.5733 | **[0.4933, 0.6549]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
-| **PR_AUC** | 0.0935 | **[0.0643, 0.1379]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **F1** | 0.1443 | **[0.0494, 0.2353]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **PRECISION** | 0.1321 | **[0.0454, 0.2258]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **RECALL** | 0.1591 | **[0.0571, 0.2750]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **ROC_AUC** | 0.5758 | **[0.4874, 0.6686]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
+| **PR_AUC** | 0.1126 | **[0.0730, 0.1894]** | Wider CI reflects sparse test anomaly count ($N_{anom}=44$) |
 
 ### Temporal Drift: Test Performance by Calendar Quarter
 | Quarter | Total Shifts | True Anomalies | Prevalence | F1 Score | Recall | Precision | ROC-AUC |
 |---|---|---|---|---|---|---|---|
-| **2025Q2** | 21 | 1 | 4.76% | 0.0000 | 0.0000 | 0.0000 | 0.3250 |
-| **2025Q3** | 204 | 11 | 5.39% | 0.0920 | 0.3636 | 0.0526 | 0.4701 |
-| **2025Q4** | 133 | 6 | 4.51% | 0.1067 | 0.6667 | 0.0580 | 0.6129 |
-| **2026Q1** | 127 | 8 | 6.30% | 0.0882 | 0.3750 | 0.0500 | 0.3981 |
-| **2026Q2** | 99 | 18 | 18.18% | 0.3951 | 0.8889 | 0.2540 | 0.6680 |
+| **2025Q2** | 21 | 1 | 4.76% | 0.0000 | 0.0000 | 0.0000 | 0.3750 |
+| **2025Q3** | 204 | 11 | 5.39% | 0.1053 | 0.0909 | 0.1250 | 0.4878 |
+| **2025Q4** | 133 | 6 | 4.51% | 0.0870 | 0.1667 | 0.0588 | 0.5938 |
+| **2026Q1** | 127 | 8 | 6.30% | 0.0909 | 0.1250 | 0.0714 | 0.3692 |
+| **2026Q2** | 99 | 18 | 18.18% | 0.2500 | 0.2222 | 0.2857 | 0.6715 |
 
 ### Per-Dimension Anomaly Capture (Primary Variant)
 | Dimension | Test Outliers | Model Recall | Precision | F1 Score | Finding |
 |---|---|---|---|---|---|
-| **Availability** | 8 | **50.00%** | 1.45% | 0.0282 | Process anomaly alignment |
-| **Performance** | 14 | **71.43%** | 3.62% | 0.0690 | Process anomaly alignment |
-| **Quality** | 23 | **56.52%** | 4.71% | 0.0870 | Process anomaly alignment |
+| **Availability** | 8 | **0.00%** | 0.00% | 0.0000 | Process anomaly alignment |
+| **Performance** | 14 | **28.57%** | 7.55% | 0.1194 | Process anomaly alignment |
+| **Quality** | 23 | **13.04%** | 5.66% | 0.0789 | Process anomaly alignment |
 
 ## 8. Feature Enrichment & Deliverable Generation
 - Enriched dataset created: `1921 rows` $\times$ `28 columns`.
-- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary), `Anomaly_Score_raw`, and cross-variant columns.
+- Output columns included: `split`, `y_anom`, `anom_A`, `anom_P`, `anom_Q`, `Anomaly_Score` (calibrated primary risk probability), `Anomaly_Score_raw` (primary alarm score, alarm if ≥ 0.50), and cross-variant columns.
 - **In-Sample Score Removal:** Optimistic in-sample training scores strictly eliminated; training rows contain out-of-fold calibrated probabilities.
 
 ## 9. Verification Suite & Diagnostic Quality Audit
@@ -200,8 +199,8 @@ In this framework, target leakage is eliminated by design:
 
 ### 2. Physical & Statistical Interpretation of Results
 - **Why is test F1 lower than same_row mode?** In `same_row` mode, the model was recovering an exact mathematical formula (an algebraic tautology), yielding an artificial F1 > 0.70. In `history_only` mode, the model is performing genuine predictive forecasting of industrial degradation from historical telemetry alone.
-- **Comparison with Baselines:** The primary model achieves **Recall = 61.36%** and **PR-AUC = 0.1604** (substantially outperforming the majority baseline PR-AUC = 0.0753 and persistence F1 = 0.0000).
-- **Ranking vs. Threshold:** Precision at matched recall confirms that SMOTEENN maintains higher precision across recall thresholds (50% to 70%), proving genuine ranking ability beyond cutoff adjustment.
+- **Comparison with Baselines:** At the fixed cutoff 0.50, the primary model (SMOTEENN raw) achieves **F1 = 0.1443**, **Recall = 15.91%**, **Precision = 13.21%** (53 alarms) and **PR-AUC = 0.1126** vs. test prevalence 0.0753. The strongest fixed-rule baseline (Previous-Run Label Persistence) reaches F1 = 0.1707.
+- **Ranking vs. Threshold:** Precision at matched recall (raw scores) isolates ranking quality from the cutoff choice; highest precision by recall level: 50% → REFERENCE, 60% → REFERENCE, 70% → REFERENCE.
 
 ---
-*Phase 2 execution and report generation completed in 34.8s.*
+*Phase 2 execution and report generation completed in 71.5s.*

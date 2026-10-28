@@ -45,5 +45,7 @@ PARAM_GRID = {
 CV_FOLDS = 5
 
 # ────────────────────────── evaluation ─────────────────────
+DECISION_CUTOFF  = 0.50                # fixed alarm cutoff, applied to RAW (uncalibrated) scores;
+                                       # isotonic-calibrated scores sit near prevalence and never reach it
 BOOTSTRAP_ROUNDS = 1000
 SEEDS_STABILITY  = [42, 7, 123, 999, 2024]

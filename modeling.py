@@ -62,7 +62,7 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     1. Run GridSearchCV with walk-forward TimeSeriesSplit(5)
     2. Collect walk-forward Out-Of-Fold (OOF) predictions
     3. Fit IsotonicRegression calibrator on non-NaN OOF predictions
-    4. Select optimal decision cutoff on calibrated OOF predictions (F1 and F2)
+    4. Score OOF F1/F2 of raw predictions at the fixed decision cutoff (cfg.DECISION_CUTOFF)
     5. Score untouched test set with both raw and calibrated model
     """
     t0 = time.time()
@@ -106,22 +106,10 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     oof_calibrated = np.full(len(X_train), np.nan)
     oof_calibrated[valid_oof_mask] = calibrator.predict(oof_valid_scores)
 
-    # 4. Evaluate the fixed 0.50 decision cutoff on OOF calibrated predictions
-    cutoffs = [0.50]
-    best_f1, best_cut_f1 = -1.0, 0.5
-    best_f2, best_cut_f2 = -1.0, 0.5
-    cal_valid_preds = oof_calibrated[valid_oof_mask]
-
-    for c in cutoffs:
-        bin_pred = (cal_valid_preds >= c).astype(int)
-        f1 = f1_score(y_oof_valid, bin_pred, zero_division=0)
-        f2 = fbeta_score(y_oof_valid, bin_pred, beta=2, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_cut_f1 = float(c)
-        if f2 > best_f2:
-            best_f2 = f2
-            best_cut_f2 = float(c)
+    # 4. Evaluate the fixed decision cutoff on raw OOF predictions
+    oof_pred = (oof_valid_scores >= cfg.DECISION_CUTOFF).astype(int)
+    oof_f1 = float(f1_score(y_oof_valid, oof_pred, zero_division=0))
+    oof_f2 = float(fbeta_score(y_oof_valid, oof_pred, beta=2, zero_division=0))
 
     oof_auc = float(roc_auc_score(y_oof_valid, oof_valid_scores)) if len(np.unique(y_oof_valid)) > 1 else float("nan")
 
@@ -141,10 +129,9 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
         "oof_calibrated": oof_calibrated,
         "warm_up_nans": warm_up_nans,
         "oof_auc": oof_auc,
-        "best_cut_f1": best_cut_f1,
-        "oof_best_f1": best_f1,
-        "best_cut_f2": best_cut_f2,
-        "oof_best_f2": best_f2,
+        "cutoff": cfg.DECISION_CUTOFF,
+        "oof_f1": oof_f1,
+        "oof_f2": oof_f2,
         "test_raw_scores": test_raw_scores,
         "test_cal_scores": test_cal_scores,
     }
