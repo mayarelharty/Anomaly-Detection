@@ -39,9 +39,12 @@ FEATURE_MODE     = "history_only"       # "history_only" (reported) | "same_row"
 # ────────────────────────── modeling variants ──────────────
 PRIMARY_VARIANT  = "smoteenn"           # "smoteenn" (primary) | "balanced" | "reference"
 PARAM_GRID = {
-    "clf__n_estimators": [100, 200, 300],
-    "clf__max_depth":    [None, 10, 20],
+    "clf__n_estimators":     [300],
+    "clf__max_depth":        [None, 5, 10],
+    "clf__min_samples_leaf": [1, 5, 10, 20],
+    "clf__max_features":     ["sqrt", 0.5],
 }
+GRID_SCORING = "average_precision"     # PR-AUC: ranking quality, stable with few positives per fold
 CV_FOLDS = 5
 
 # ────────────────────────── evaluation ─────────────────────

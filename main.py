@@ -144,7 +144,8 @@ def main():
     # STAGE 2: FEATURE ENGINEERING & MULTI-VARIANT MODELING
     # ════════════════════════════════════════════════════════════
     log("## 5. Feature Engineering: History-Only Strictness")
-    feat_data = build_history_features(df, train_idx, test_idx, df_labels_full["y_anom"])
+    feat_data = build_history_features(df, train_idx, test_idx, df_labels_full["y_anom"],
+                                       global_fences, group_fences)
 
     X_train = feat_data["X_train"]
     y_train = feat_data["y_train"]
@@ -207,12 +208,13 @@ def main():
     all_variants_data[cfg.PRIMARY_VARIANT]["cv_results"].to_csv(os.path.join(cfg.OUTPUT_DIR, "cv_results.csv"), index=False)
 
     log("### Hyperparameter & Calibration Summary Table")
-    log("| Variant | Best Parameters | Best CV F1 | OOF ROC-AUC | Decision Cutoff (Raw) | OOF F1 @ Cutoff | OOF F2 @ Cutoff | Warm-up NaNs |")
+    log("| Variant | Best Parameters | Best CV PR-AUC | OOF ROC-AUC | Decision Cutoff (Raw) | OOF F1 @ Cutoff | OOF F2 @ Cutoff | Warm-up NaNs |")
     log("|---|---|---|---|---|---|---|---|")
     for vname in variants_list:
         vd = all_variants_data[vname]
-        bp_str = f"depth={vd['best_params']['clf__max_depth']}, n_est={vd['best_params']['clf__n_estimators']}"
-        log(f"| **{vname.upper()}** | `{bp_str}` | {vd['best_cv_f1']:.4f} | {vd['oof_auc']:.4f} | **{vd['cutoff']:.2f}** | {vd['oof_f1']:.4f} | {vd['oof_f2']:.4f} | {vd['warm_up_nans']} shifts |")
+        bp = vd["best_params"]
+        bp_str = f"depth={bp['clf__max_depth']}, leaf={bp['clf__min_samples_leaf']}, max_feat={bp['clf__max_features']}, n_est={bp['clf__n_estimators']}"
+        log(f"| **{vname.upper()}** | `{bp_str}` | {vd['best_cv_score']:.4f} | {vd['oof_auc']:.4f} | **{vd['cutoff']:.2f}** | {vd['oof_f1']:.4f} | {vd['oof_f2']:.4f} | {vd['warm_up_nans']} shifts |")
     log("")
 
     # ── 9. Test Period Evaluation & Multi-Variant Comparison ─

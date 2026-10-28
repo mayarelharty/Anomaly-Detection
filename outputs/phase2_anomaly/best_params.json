@@ -1,14 +1,20 @@
 {
   "smoteenn": {
-    "clf__max_depth": "None",
-    "clf__n_estimators": 100
+    "clf__max_depth": 10,
+    "clf__max_features": 0.5,
+    "clf__min_samples_leaf": 20,
+    "clf__n_estimators": 300
   },
   "balanced": {
-    "clf__max_depth": 10,
-    "clf__n_estimators": 100
+    "clf__max_depth": "None",
+    "clf__max_features": "sqrt",
+    "clf__min_samples_leaf": 20,
+    "clf__n_estimators": 300
   },
   "reference": {
-    "clf__max_depth": "None",
-    "clf__n_estimators": 100
+    "clf__max_depth": 5,
+    "clf__max_features": "sqrt",
+    "clf__min_samples_leaf": 20,
+    "clf__n_estimators": 300
   }
 }

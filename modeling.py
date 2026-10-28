@@ -6,7 +6,7 @@ Implements three imbalance variants:
 - Variant B: Balanced class weights (no resampling)
 - Variant C: Reference model (unweighted, no resampling)
 
-Fits isotonic calibration and threshold optimization on walk-forward OOF predictions only.
+Fits isotonic calibration on walk-forward OOF predictions only.
 """
 
 import time
@@ -74,7 +74,7 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     gs = GridSearchCV(
         estimator=pipe,
         param_grid=cfg.PARAM_GRID,
-        scoring="f1",
+        scoring=cfg.GRID_SCORING,
         refit=True,
         cv=cv,
         n_jobs=-1,
@@ -82,10 +82,10 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
     )
     gs.fit(X_train, y_train)
     best_params = gs.best_params_
-    best_cv_f1  = float(gs.best_score_)
+    best_cv_score = float(gs.best_score_)
     final_model = gs.best_estimator_
 
-    print(f"  [modeling] Best params: {best_params} (CV F1: {best_cv_f1:.4f}) [{time.time()-t0:.1f}s]")
+    print(f"  [modeling] Best params: {best_params} (CV {cfg.GRID_SCORING}: {best_cv_score:.4f}) [{time.time()-t0:.1f}s]")
 
     # 2. Collect walk-forward OOF predictions
     oof_raw = np.full(len(X_train), np.nan)
@@ -122,7 +122,7 @@ def train_and_calibrate_variant(variant_name: str, X_train: pd.DataFrame, y_trai
         "final_model": final_model,
         "grid_search": gs,
         "best_params": best_params,
-        "best_cv_f1": best_cv_f1,
+        "best_cv_score": best_cv_score,
         "cv_results": pd.DataFrame(gs.cv_results_),
         "calibrator": calibrator,
         "oof_raw": oof_raw,

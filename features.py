@@ -96,12 +96,31 @@ class ScaledFeatureSelector(BaseEstimator, TransformerMixin):
         return np.array(self.keep_columns_)
 
 
-def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Series):
+RECENCY_CAP = 20  # runs_since_anom value when no anomaly seen in the group yet (and upper cap)
+
+
+def _runs_since_anom(prev_anom: pd.Series) -> pd.Series:
+    """Runs back to the most recent prior anomaly (1 = previous run), capped at RECENCY_CAP."""
+    out, count = [], RECENCY_CAP
+    for v in prev_anom:
+        if pd.isna(v):
+            out.append(np.nan)
+            continue
+        count = 1 if v == 1 else min(count + 1, RECENCY_CAP)
+        out.append(count)
+    return pd.Series(out, index=prev_anom.index)
+
+
+def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Series,
+                           global_fences: dict, group_fences: dict):
     """
     Construct strictly historical features per machine + model:
-    - machine_code, model_code, day_of_week, month
+    - machine_code, model_code, day_of_week, month, days_since_prev
     - lag-1 of A, P, Q, y_anom
     - rolling-5 (shifted, mean of previous up to 5 runs) of A, P, Q, y_anom
+    - fence margins: lag-1 and rolling-5 minimum of A, P, Q minus the group's training fence
+    - trend / volatility: lag-1 minus rolling-5 mean, rolling-5 std of A, P, Q
+    - recency: runs since last anomaly, anomaly count in previous 10 runs
 
     Drops rows with no previous run (first run of each machine+model).
     Performs hand verification on lag integrity and asserts no forbidden features.
@@ -116,6 +135,8 @@ def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Ser
     df_feat["model_code"]   = df_feat["Model"].astype("category").cat.codes
 
     group_cols = ["machine", "Model"]
+    # Scheduled date of the current run is known in advance; gap to the previous run is history
+    df_feat["days_since_prev"] = df_feat.groupby(group_cols)["Date"].diff().dt.days
     metrics_to_lag = [
         ("Availability (A)", "Availability"),
         ("Performance (P)",  "Performance"),
@@ -132,12 +153,43 @@ def build_history_features(df: pd.DataFrame, train_idx, test_idx, y_anom: pd.Ser
                    .transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
         )
 
+    # Fence margins, trend and volatility (fences come from the training period only)
+    fence_keys = list(zip(df_feat["machine"], df_feat["Model"]))
+    for raw_c, short_c in metrics_to_lag[:3]:
+        fence = pd.Series(
+            [group_fences.get(k, global_fences)[raw_c] if cfg.IQR_SCOPE == "machine_model" else global_fences[raw_c]
+             for k in fence_keys],
+            index=df_feat.index,
+        )
+        roll5_min = df_feat.groupby(group_cols)[raw_c].transform(lambda s: s.shift(1).rolling(5, min_periods=1).min())
+        df_feat[f"margin1_{short_c}"]    = df_feat[f"lag1_{short_c}"] - fence
+        df_feat[f"margin_min5_{short_c}"] = roll5_min - fence
+        df_feat[f"trend_{short_c}"]      = df_feat[f"lag1_{short_c}"] - df_feat[f"roll5_{short_c}"]
+        df_feat[f"std5_{short_c}"] = (
+            df_feat.groupby(group_cols)[raw_c]
+                   .transform(lambda s: s.shift(1).rolling(5, min_periods=2).std())
+                   .fillna(0.0)
+        )
+
+    # Recency of trouble
+    prev_anom = df_feat.groupby(group_cols)["y_anom"].shift(1)
+    df_feat["runs_since_anom"] = prev_anom.groupby([df_feat[c] for c in group_cols]).transform(_runs_since_anom)
+    df_feat["anom_count10"] = (
+        df_feat.groupby(group_cols)["y_anom"]
+               .transform(lambda s: s.shift(1).rolling(10, min_periods=1).sum())
+    )
+
     feature_cols = [
         "machine_code", "model_code", "day_of_week", "month",
         "lag1_Availability", "roll5_Availability",
         "lag1_Performance",  "roll5_Performance",
         "lag1_Quality",      "roll5_Quality",
         "lag1_y_anom",       "roll5_y_anom",
+        "days_since_prev",
+        "margin1_Availability", "margin_min5_Availability", "trend_Availability", "std5_Availability",
+        "margin1_Performance",  "margin_min5_Performance",  "trend_Performance",  "std5_Performance",
+        "margin1_Quality",      "margin_min5_Quality",      "trend_Quality",      "std5_Quality",
+        "runs_since_anom", "anom_count10",
     ]
 
     # Check for forbidden columns
