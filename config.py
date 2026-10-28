@@ -68,7 +68,7 @@ GRID_SCORING = GRID_SCORINGS[TUNING_MODE]
 CV_FOLDS = 5
 
 # ────────────────────────── evaluation ─────────────────────
-CUTOFF_MODE      = "oof_f1"             # "oof_f1" (spec: F1-optimal cutoff on calibrated OOF; F2 cutoff recorded) |
+CUTOFF_MODE      = "fixed_raw"          # "oof_f1" (spec: F1-optimal cutoff on calibrated OOF; F2 cutoff recorded) |
                                         # "fixed_raw" (DECISION_CUTOFF on raw scores)
 DECISION_CUTOFF  = 0.50                 # fixed_raw cutoff; calibrated scores sit near prevalence and rarely reach it
 SPEC_DEFAULTS = {"FEATURE_SET": "spec", "TUNING_MODE": "spec", "CUTOFF_MODE": "oof_f1",
