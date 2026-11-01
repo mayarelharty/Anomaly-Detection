@@ -50,6 +50,18 @@ def df_to_markdown(df_in):
         return "\n".join(lines)
 
 
+def safe_joblib_dump(obj, filepath, retries=5, delay=1.0):
+    """Save joblib model safely on Windows handling temporary Defender file locks."""
+    for i in range(retries):
+        try:
+            joblib.dump(obj, filepath, compress=3)
+            return
+        except OSError:
+            if i == retries - 1:
+                raise
+            time.sleep(delay)
+
+
 def main():
     t_start = time.time()
     report_sections = []
@@ -113,7 +125,7 @@ def main():
     label_method, global_fences, group_fences, train_labels, test_labels, fallback_note = resolve_labels(train_df, test_df)
     df_labels_full = pd.concat([train_labels, test_labels]).sort_index()
 
-    plot_boxplot_with_fences(train_df, global_fences, cfg.OUTPUT_DIR)
+    plot_boxplot_with_fences(train_df, global_fences, cfg.OUTPUT_DIR, method=label_method)
 
     label_report_text = label_distribution_report(
         df, train_labels, test_labels, train_idx, test_idx, global_fences, group_fences, method=label_method
@@ -216,10 +228,10 @@ def main():
         best_params_all[vname] = {k: (str(v) if v is None else v) for k, v in v_res["best_params"].items()}
 
         # Save model joblib
-        joblib.dump(v_res["final_model"], os.path.join(cfg.OUTPUT_DIR, f"rf_{vname}.joblib"))
+        safe_joblib_dump(v_res["final_model"], os.path.join(cfg.OUTPUT_DIR, f"rf_{vname}.joblib"))
 
     # Save primary model as default joblib
-    joblib.dump(all_variants_data[cfg.PRIMARY_VARIANT]["final_model"], os.path.join(cfg.OUTPUT_DIR, "rf_anomaly_model.joblib"))
+    safe_joblib_dump(all_variants_data[cfg.PRIMARY_VARIANT]["final_model"], os.path.join(cfg.OUTPUT_DIR, "rf_anomaly_model.joblib"))
 
     # Save best_params.json
     with open(os.path.join(cfg.OUTPUT_DIR, "best_params.json"), "w") as f:

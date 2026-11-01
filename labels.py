@@ -21,17 +21,44 @@ FENCE_COLS = DIMS + ["OEE"]
 
 METHOD_RULES = {
     "iqr":        "Box plot: $D < Q_1 - K \\times \\text{IQR}$ on any of A, P, Q",
+    "adjusted":   "Skew-adjusted box plot: $D < Q_1 - K e^{-a \\cdot MC} \\text{IQR}$ ($a = 4$ if $MC \\ge 0$, else 3) on any of A, P, Q",
     "percentile": f"Alt A: $D < P_{{{int(cfg.FALLBACK_PERCENTILE * 100)}}}$ on any of A, P, Q",
     "oee":        "Alt B: $\\text{OEE} < Q_1 - K \\times \\text{IQR}$ (single composite fence)",
     "benchmark":  "Alt C: $A < 0.90 \\lor P < 0.95 \\lor Q < 0.999$ (static industry targets)",
 }
 
 
+def medcouple(x) -> float:
+    """
+    Medcouple (Brys, Hubert & Struyf 2004): robust skewness in [-1, 1], 0 for symmetric data,
+    negative for a long lower tail. Exact O(n^2) computation, including the tie kernel at the median.
+    """
+    x = np.sort(np.asarray(x, dtype=float))
+    x = x[~np.isnan(x)]
+    m = np.median(x)
+    upper, lower, n_tie = x[x > m], x[x < m], int(np.sum(x == m))
+
+    xi, xj = upper[:, None], lower[None, :]
+    h = [(((xi - m) - (m - xj)) / (xi - xj)).ravel(),
+         np.ones(len(upper) * n_tie),            # x_i > m, x_j = m
+         -np.ones(n_tie * len(lower))]           # x_i = m, x_j < m
+    if n_tie:
+        i, j = np.meshgrid(np.arange(1, n_tie + 1), np.arange(1, n_tie + 1), indexing="ij")
+        h.append(np.sign(i + j - 1 - n_tie).ravel())   # both at the median
+    return float(np.median(np.concatenate(h)))
+
+
 def _lower_fence(s: pd.Series, k: float, method: str) -> float:
-    """Training-only lower fence of one series; Alt A uses a percentile, everything else Tukey IQR."""
+    """
+    Training-only lower fence of one series. Alt A uses a percentile; "adjusted" uses the
+    Hubert & Vandervieren (2008) skew-adjusted box plot; everything else Tukey IQR.
+    """
     if method == "percentile":
         return float(s.quantile(cfg.FALLBACK_PERCENTILE))
     q1, q3 = s.quantile(0.25), s.quantile(0.75)
+    if method == "adjusted":
+        mc = medcouple(s)
+        return float(q1 - k * np.exp((-4.0 if mc >= 0 else -3.0) * mc) * (q3 - q1))
     return float(q1 - k * (q3 - q1))
 
 
@@ -181,8 +208,8 @@ def resolve_labels(train_df: pd.DataFrame, test_df: pd.DataFrame):
     gf, grpf, _ = compute_fences(train_df, method=method)
     tr = apply_fences(train_df, gf, grpf, method=method)
     te = apply_fences(test_df, gf, grpf, method=method)
-    if method == "iqr" and cfg.AUTO_FALLBACK_PERCENTILE and tr["y_anom"].sum() < cfg.MIN_MINORITY_TRAIN:
-        note = (f"IQR fences produced {int(tr['y_anom'].sum())} training anomalies (< {cfg.MIN_MINORITY_TRAIN}); "
+    if method in ("iqr", "adjusted") and cfg.AUTO_FALLBACK_PERCENTILE and tr["y_anom"].sum() < cfg.MIN_MINORITY_TRAIN:
+        note = (f"{'Skew-adjusted' if method == 'adjusted' else 'IQR'} fences produced {int(tr['y_anom'].sum())} training anomalies (< {cfg.MIN_MINORITY_TRAIN}); "
                 f"fell back to Alternative A (P{int(cfg.FALLBACK_PERCENTILE * 100)} percentile fences).")
         method = "percentile"
         gf, grpf, _ = compute_fences(train_df, method=method)
@@ -194,7 +221,7 @@ def resolve_labels(train_df: pd.DataFrame, test_df: pd.DataFrame):
 def run_alternatives_table(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
     """Label counts and gate status for the box-plot rule and the three documented alternatives."""
     rows = []
-    for method, name in [("iqr", "Box plot (default)"), ("percentile", "Alternative A"),
+    for method, name in [("iqr", "Box plot (Tukey)"), ("adjusted", "Skew-adjusted box plot"), ("percentile", "Alternative A"),
                          ("oee", "Alternative B"), ("benchmark", "Alternative C")]:
         gf, grpf, _ = compute_fences(train_df, method=method)
         tr = apply_fences(train_df, gf, grpf, method=method)
@@ -221,6 +248,7 @@ def label_distribution_report(df: pd.DataFrame, train_labels: pd.DataFrame, test
     method = cfg.THRESHOLD_METHOD if method is None else method
     fence_desc = {
         "iqr":        f"$Q_1 - {cfg.IQR_K} \\times \\text{{IQR}}$ on Train",
+        "adjusted":   f"$Q_1 - {cfg.IQR_K} e^{{-a \\cdot MC}} \\text{{IQR}}$ on Train",
         "oee":        f"$Q_1 - {cfg.IQR_K} \\times \\text{{IQR}}$ on Train",
         "percentile": f"$P_{{{int(cfg.FALLBACK_PERCENTILE * 100)}}}$ on Train",
         "benchmark":  "Static industry target",
@@ -228,6 +256,7 @@ def label_distribution_report(df: pd.DataFrame, train_labels: pd.DataFrame, test
     label_dims = ["OEE"] if method == "oee" else DIMS
     lines = []
     lines.append("## Label Distribution (Box-Plot IQR Rule)" if method == "iqr"
+                 else "## Label Distribution (Skew-Adjusted Box-Plot Rule)" if method == "adjusted"
                  else f"## Label Distribution ({METHOD_RULES[method].split(':')[0]})")
     lines.append(f"- Labelling rule: {METHOD_RULES[method]}.")
     lines.append(f"- Configuration: `THRESHOLD_METHOD = '{method}'`, `IQR_K = {cfg.IQR_K}`, `IQR_SCOPE = '{cfg.IQR_SCOPE}'`, `MIN_GROUP_TRAIN = {cfg.MIN_GROUP_TRAIN}`")
@@ -235,21 +264,27 @@ def label_distribution_report(df: pd.DataFrame, train_labels: pd.DataFrame, test
 
     # Global fences
     lines.append("### Global Training Fences")
-    lines.append("| Dimension | Lower Fence | Description | Used for $y_{\\text{anom}}$ |")
-    lines.append("|---|---|---|---|")
+    train_rows = df.loc[train_idx]
+    lines.append("| Dimension | Lower Fence | Description | Medcouple (skew) | Used for $y_{\\text{anom}}$ |")
+    lines.append("|---|---|---|---|---|")
     for d in FENCE_COLS:
-        lines.append(f"| {d} | **{global_fences[d]:.4f}** | {fence_desc} | {'Yes' if d in label_dims else 'No'} |")
+        lines.append(f"| {d} | **{global_fences[d]:.4f}** | {fence_desc} | {medcouple(train_rows[d]):.3f} | {'Yes' if d in label_dims else 'No'} |")
     lines.append("")
 
     # Group fences
     lines.append("### Machine & Model Group Fences (Train)")
-    lines.append(f"- Total groups in training: {len(group_fences)} met threshold $\\ge {cfg.MIN_GROUP_TRAIN}$ rows.")
+    if cfg.IQR_SCOPE == "global":
+        lines.append("- Scope: `global`. All machine and product groups use the 3 global training fences.")
+    else:
+        lines.append(f"- Total groups in training: {len(group_fences)} met threshold $\\ge {cfg.MIN_GROUP_TRAIN}$ rows.")
     lines.append("| Machine | Model | Train Rows | Fence A | Fence P | Fence Q | Status |")
     lines.append("|---|---|---|---|---|---|---|")
     train_groups = df.loc[train_idx].groupby(["machine", "Model"])
     for (m, mod), grp in train_groups:
         n = len(grp)
-        if (m, mod) in group_fences:
+        if cfg.IQR_SCOPE == "global":
+            lines.append(f"| {m} | {mod} | {n} | {global_fences['Availability (A)']:.4f} | {global_fences['Performance (P)']:.4f} | {global_fences['Quality (Q)']:.4f} | Global |")
+        elif (m, mod) in group_fences:
             gf = group_fences[(m, mod)]
             lines.append(f"| {m} | {mod} | {n} | {gf['Availability (A)']:.4f} | {gf['Performance (P)']:.4f} | {gf['Quality (Q)']:.4f} | Group-specific |")
         else:
@@ -339,25 +374,30 @@ def run_sensitivity_table(train_df: pd.DataFrame, test_df: pd.DataFrame):
     return sens_df
 
 
-def plot_boxplot_with_fences(train_df: pd.DataFrame, global_fences: dict, output_dir: str):
+def plot_boxplot_with_fences(train_df: pd.DataFrame, global_fences: dict, output_dir: str, method: str = None):
     """
-    Extended box plot visualization showing distributions, outliers, and training lower fences
-    for A, P, Q and OEE.
+    Extended box plot visualization showing distributions, training lower fences for A, P, Q and OEE,
+    and (red dots) the training values below each fence.
     """
+    method = cfg.THRESHOLD_METHOD if method is None else method
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     cols = FENCE_COLS
     palette = ["#4A90E2", "#50E3C2", "#F5A623", "#9B59B6"]
 
     for ax, col, color in zip(axes, cols, palette):
-        sns.boxplot(y=train_df[col], ax=ax, color=color, flierprops={'marker':'o', 'markerfacecolor':'crimson', 'markersize':4, 'alpha':0.6})
+        sns.boxplot(y=train_df[col], ax=ax, color=color, whis=(0, 100), showfliers=False)
         fence = global_fences[col]
+        below = train_df.loc[train_df[col] < fence, col]
+        ax.scatter(np.zeros(len(below)), below, color="crimson", s=14, alpha=0.6, zorder=3,
+                   label=f"Below fence (n = {len(below)})")
         ax.axhline(fence, color="red", linestyle="--", linewidth=1.5, label=f"Global Lower Fence ({fence:.3f})")
         ax.set_title(col, fontsize=12, fontweight='bold')
         ax.set_ylabel("Value")
         ax.legend(loc="lower left", fontsize=9)
         ax.grid(axis='y', linestyle=':', alpha=0.5)
 
-    plt.suptitle(f"Training Period Distributions & Outlier Fences (IQR K = {cfg.IQR_K})", fontsize=14, fontweight='bold')
+    rule = {"iqr": "Tukey box plot", "adjusted": "Skew-adjusted box plot"}.get(method, method)
+    plt.suptitle(f"Training Period Distributions & Global Lower Fences ({rule}, K = {cfg.IQR_K})", fontsize=14, fontweight='bold')
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "boxplot_outliers_fences.png")
     plt.savefig(plot_path, dpi=200)

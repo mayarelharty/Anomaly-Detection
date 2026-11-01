@@ -25,7 +25,7 @@ TEST_SIZE  = 0.30
 
 # ────────────────────────── labelling (IQR Rule) ───────────
 IQR_K            = 1.5                  # 1.5 (default Tukey fence) | 2.0 | 3.0
-IQR_SCOPE        = "machine_model"      # "machine_model" (per group) | "global"
+IQR_SCOPE        = "global"             # "machine_model" (per group) | "global"
 MIN_GROUP_TRAIN  = 20                   # minimum training rows required to compute group fence
 THRESHOLD_METHOD = "iqr"                # "iqr" (Tukey box plot, default) | "percentile" (Alt A) |
                                         # "oee" (Alt B: single composite OEE fence) | "benchmark" (Alt C: static targets)
@@ -49,11 +49,16 @@ FEATURE_SET      = "spec"               # "spec" (12 lag/rolling/code features) 
 
 # ────────────────────────── modeling variants ──────────────
 PRIMARY_VARIANT  = "smoteenn"           # "smoteenn" (primary) | "balanced" | "reference"
-TUNING_MODE      = "spec"               # "spec" (3x3 grid, F1) | "extended" (leaf/max_features grid, PR-AUC)
+TUNING_MODE      = "regularized"        # "regularized" (controlled depth + leaf constraints) | "spec" | "extended"
 PARAM_GRIDS = {
     "spec": {
         "clf__n_estimators": [100, 200, 300],
         "clf__max_depth":    [None, 10, 20],
+    },
+    "regularized": {
+        "clf__n_estimators":     [300, 500],
+        "clf__max_depth":        [5, 8, 12],
+        "clf__min_samples_leaf": [2, 5, 10],
     },
     "extended": {
         "clf__n_estimators":     [300],
@@ -62,7 +67,7 @@ PARAM_GRIDS = {
         "clf__max_features":     ["sqrt", 0.5],
     },
 }
-GRID_SCORINGS = {"spec": "f1", "extended": "average_precision"}   # PR-AUC is more stable with few positives per fold
+GRID_SCORINGS = {"spec": "f1", "regularized": "f1", "extended": "average_precision"}   # PR-AUC is more stable with few positives per fold
 PARAM_GRID   = PARAM_GRIDS[TUNING_MODE]
 GRID_SCORING = GRID_SCORINGS[TUNING_MODE]
 CV_FOLDS = 5
