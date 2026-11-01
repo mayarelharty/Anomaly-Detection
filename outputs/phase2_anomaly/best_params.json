@@ -1,17 +1,17 @@
 {
   "smoteenn": {
-    "clf__max_depth": 12,
-    "clf__min_samples_leaf": 10,
-    "clf__n_estimators": 300
+    "clf__max_depth": 2,
+    "clf__min_samples_leaf": 2,
+    "clf__n_estimators": 100
   },
   "balanced": {
-    "clf__max_depth": 5,
+    "clf__max_depth": 3,
     "clf__min_samples_leaf": 10,
-    "clf__n_estimators": 500
+    "clf__n_estimators": 100
   },
   "reference": {
-    "clf__max_depth": 5,
+    "clf__max_depth": 2,
     "clf__min_samples_leaf": 2,
-    "clf__n_estimators": 300
+    "clf__n_estimators": 100
   }
 }

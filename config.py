@@ -55,9 +55,9 @@ PARAM_GRIDS = {
         "clf__n_estimators": [100, 200, 300],
         "clf__max_depth":    [None, 10, 20],
     },
-    "regularized": {
-        "clf__n_estimators":     [300, 500],
-        "clf__max_depth":        [5, 8, 12],
+    "regularized": {                    # trees x depth from walk-forward CV sweep: shallow trees (2-3) rank best,
+        "clf__n_estimators":     [100, 300], # gains flatten beyond ~100-300 trees
+        "clf__max_depth":        [2, 3, 4, 5],
         "clf__min_samples_leaf": [2, 5, 10],
     },
     "extended": {
