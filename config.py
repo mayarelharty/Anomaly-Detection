@@ -53,7 +53,7 @@ TUNING_MODE      = "regularized"        # "regularized" (controlled depth + leaf
 PARAM_GRIDS = {
     "spec": {
         "clf__n_estimators": [100, 200, 300],
-        "clf__max_depth":    [None, 10, 20],
+        "clf__max_depth":    [None, 10, 20]
     },
     "regularized": {                    # trees x depth from walk-forward CV sweep: shallow trees (2-3) rank best,
         "clf__n_estimators":     [100, 300], # gains flatten beyond ~100-300 trees

@@ -236,4 +236,4 @@ In this framework, target leakage is eliminated by design:
 - **Ranking vs. Threshold:** Precision at matched recall (alarm scores) isolates ranking quality from the cutoff choice; highest precision by recall level: 50% → SMOTEENN, 60% → SMOTEENN, 70% → SMOTEENN.
 
 ---
-*Phase 2 execution and report generation completed in 52.7s.*
+*Phase 2 execution and report generation completed in 78.5s.*
